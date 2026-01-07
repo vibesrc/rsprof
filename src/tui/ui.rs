@@ -257,12 +257,16 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
             .data(&visible_data),
     ];
 
+    // Generate x-axis labels based on visible range
+    let x_labels = generate_time_labels(x_start, x_end);
+
     let chart = Chart::new(datasets)
         .block(block)
         .x_axis(
             Axis::default()
                 .style(Style::default().fg(Color::DarkGray))
-                .bounds([x_start, x_end]),
+                .bounds([x_start, x_end])
+                .labels(x_labels),
         )
         .y_axis(
             Axis::default()
@@ -277,6 +281,41 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
         );
 
     frame.render_widget(chart, area);
+}
+
+/// Generate x-axis time labels: start, middle, end
+/// Adapts unit (seconds, minutes, hours) based on zoom level
+fn generate_time_labels(start: f64, end: f64) -> Vec<Span<'static>> {
+    let mid = (start + end) / 2.0;
+
+    vec![
+        Span::raw(format_time(start.max(0.0))),
+        Span::raw(format_time(mid.max(0.0))),
+        Span::raw(format_time(end)),
+    ]
+}
+
+/// Format time value with appropriate unit
+fn format_time(secs: f64) -> String {
+    if secs >= 3600.0 {
+        let h = (secs / 3600.0) as i64;
+        let m = ((secs % 3600.0) / 60.0) as i64;
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h{}m", h, m)
+        }
+    } else if secs >= 60.0 {
+        let m = (secs / 60.0) as i64;
+        let s = (secs % 60.0) as i64;
+        if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m{}s", m, s)
+        }
+    } else {
+        format!("{}s", secs as i64)
+    }
 }
 
 /// Strip the hash suffix from Rust function names (e.g., "foo::h1234abcd" -> "foo")

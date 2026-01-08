@@ -25,6 +25,10 @@ rustc-demangle = "0.1"
 nix = { version = "0.29", features = ["process", "mman", "fs"] }
 libc = "0.2"
 
+# eBPF (for heap profiling) - optional
+libbpf-rs = { version = "0.24", optional = true }
+plain = { version = "0.2", optional = true }
+
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
 
@@ -37,6 +41,14 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 humantime = "2"
 comfy-table = "7"
 
+[build-dependencies]
+libbpf-cargo = { version = "0.24", optional = true }
+
+[features]
+default = ["heap"]
+heap = ["libbpf-rs", "plain", "libbpf-cargo"]
+
 [profile.release]
 lto = true
 codegen-units = 1
+debug = true

@@ -1,6 +1,6 @@
 use crate::cli::TopMetric;
 use crate::error::Result;
-use crate::storage::query_top_cpu;
+use crate::storage::{query_top_cpu, query_top_heap_live, HeapEntry};
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
@@ -48,7 +48,22 @@ pub fn run(
             }
         }
         TopMetric::Heap => {
-            eprintln!("Heap profiling not yet implemented");
+            let entries = query_top_heap_live(&conn, limit)?;
+
+            if entries.is_empty() {
+                eprintln!("No heap data found. Heap profiling requires:");
+                eprintln!("  - The 'heap' feature enabled at build time");
+                eprintln!("  - Running as root or with CAP_BPF capability");
+                return Ok(());
+            }
+
+            if json {
+                print_heap_json(file, duration_ms, &entries);
+            } else if csv {
+                print_heap_csv(&entries);
+            } else {
+                print_heap_table(file, duration_ms, &entries);
+            }
         }
     }
 
@@ -174,6 +189,88 @@ fn simplify_path(path: &str) -> String {
         .next()
         .unwrap_or(path)
         .to_string()
+}
+
+fn print_heap_table(
+    file: &Path,
+    duration_ms: Option<i64>,
+    entries: &[HeapEntry],
+) {
+    println!("# {}", file.display());
+    if let Some(ms) = duration_ms {
+        let secs = ms / 1000;
+        let mins = secs / 60;
+        let remaining_secs = secs % 60;
+        println!("# Duration: {}m{:02}s", mins, remaining_secs);
+    }
+    println!();
+
+    println!("{:>10}  {:>10}  {:>10}  {:<30}  {}", "ALLOC", "FREE", "LIVE", "LOCATION", "FUNCTION");
+    println!("{}", "-".repeat(90));
+
+    for entry in entries {
+        let location = format_location(&entry.file, entry.line);
+        let function = format_function(&entry.function);
+        let alloc = format_bytes(entry.total_alloc_bytes);
+        let free = format_bytes(entry.total_free_bytes);
+        let live = format_bytes(entry.live_bytes);
+        println!("{:>10}  {:>10}  {:>10}  {:<30}  {}", alloc, free, live, location, function);
+    }
+}
+
+fn print_heap_json(
+    file: &Path,
+    duration_ms: Option<i64>,
+    entries: &[HeapEntry],
+) {
+    println!("{{");
+    println!("  \"file\": \"{}\",", file.display());
+    if let Some(ms) = duration_ms {
+        println!("  \"duration_ms\": {},", ms);
+    }
+    println!("  \"entries\": [");
+
+    for (i, entry) in entries.iter().enumerate() {
+        let comma = if i < entries.len() - 1 { "," } else { "" };
+        println!(
+            "    {{ \"alloc_bytes\": {}, \"free_bytes\": {}, \"live_bytes\": {}, \"file\": \"{}\", \"line\": {}, \"function\": \"{}\" }}{}",
+            entry.total_alloc_bytes,
+            entry.total_free_bytes,
+            entry.live_bytes,
+            entry.file.replace('\\', "\\\\").replace('"', "\\\""),
+            entry.line,
+            entry.function.replace('\\', "\\\\").replace('"', "\\\""),
+            comma
+        );
+    }
+
+    println!("  ]");
+    println!("}}");
+}
+
+fn print_heap_csv(entries: &[HeapEntry]) {
+    println!("alloc_bytes,free_bytes,live_bytes,file,line,function");
+    for entry in entries {
+        println!(
+            "{},{},{},{},{},\"{}\"",
+            entry.total_alloc_bytes, entry.total_free_bytes, entry.live_bytes, entry.file, entry.line, entry.function
+        );
+    }
+}
+
+/// Format bytes as human-readable
+fn format_bytes(bytes: i64) -> String {
+    let abs = bytes.unsigned_abs();
+    let sign = if bytes < 0 { "-" } else { "" };
+    if abs >= 1024 * 1024 * 1024 {
+        format!("{}{}GB", sign, abs / (1024 * 1024 * 1024))
+    } else if abs >= 1024 * 1024 {
+        format!("{}{}MB", sign, abs / (1024 * 1024))
+    } else if abs >= 1024 {
+        format!("{}{}KB", sign, abs / 1024)
+    } else {
+        format!("{}{}B", sign, abs)
+    }
 }
 
 /// Format a function name - remove hash suffix and simplify

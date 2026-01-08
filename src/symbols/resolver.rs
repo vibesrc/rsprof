@@ -53,7 +53,8 @@ impl SymbolResolver {
     /// Create a new symbol resolver for a process
     pub fn new(proc_info: &ProcessInfo) -> Result<Self> {
         // Parse DWARF info from executable
-        let dwarf = DwarfInfo::parse(proc_info.exe_path())?;
+        // Use proc_exe_path which works even if binary was deleted/rebuilt
+        let dwarf = DwarfInfo::parse(proc_info.proc_exe_path())?;
 
         // Get ASLR offset from memory maps
         let maps = MemoryMaps::for_pid(proc_info.pid())?;

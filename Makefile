@@ -34,7 +34,7 @@ clean:
 
 # Example target app
 target:
-	cargo build --example target_app
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 run-target: target
 	./target/debug/examples/target_app

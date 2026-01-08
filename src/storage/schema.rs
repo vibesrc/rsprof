@@ -1,12 +1,13 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Create all tables (drops existing tables first to ensure clean state)
 pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
         -- Drop existing tables to ensure clean state for new session
+        DROP TABLE IF EXISTS heap_samples;
         DROP TABLE IF EXISTS cpu_samples;
         DROP TABLE IF EXISTS checkpoints;
         DROP TABLE IF EXISTS locations;
@@ -45,6 +46,21 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
 
         -- Index for timeseries queries by location
         CREATE INDEX idx_cpu_location ON cpu_samples(location_id);
+
+        -- Heap samples per checkpoint (references location_id)
+        CREATE TABLE heap_samples (
+            checkpoint_id INTEGER NOT NULL,
+            location_id INTEGER NOT NULL,
+            alloc_bytes INTEGER NOT NULL DEFAULT 0,
+            free_bytes INTEGER NOT NULL DEFAULT 0,
+            live_bytes INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (checkpoint_id, location_id),
+            FOREIGN KEY (checkpoint_id) REFERENCES checkpoints(id),
+            FOREIGN KEY (location_id) REFERENCES locations(id)
+        );
+
+        -- Index for timeseries queries by location
+        CREATE INDEX idx_heap_location ON heap_samples(location_id);
         "#,
     )
 }

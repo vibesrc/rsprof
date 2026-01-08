@@ -7,6 +7,8 @@ pub struct ProcessInfo {
     pid: u32,
     name: String,
     exe_path: PathBuf,
+    /// Path to /proc/[pid]/exe - works even if binary was deleted/rebuilt
+    proc_exe_path: PathBuf,
 }
 
 impl ProcessInfo {
@@ -26,13 +28,26 @@ impl ProcessInfo {
             .to_string();
 
         // Get executable path from /proc/[pid]/exe
-        let exe_path = fs::read_link(format!("{}/exe", proc_path))
+        let proc_exe_path = PathBuf::from(format!("{}/exe", proc_path));
+        let exe_path = fs::read_link(&proc_exe_path)
             .map_err(|e| Error::PermissionDenied(format!("Cannot read exe for PID {}: {}", pid, e)))?;
+
+        // Strip " (deleted)" suffix if present (happens when binary was rebuilt)
+        let exe_path = if let Some(s) = exe_path.to_str() {
+            if let Some(stripped) = s.strip_suffix(" (deleted)") {
+                PathBuf::from(stripped)
+            } else {
+                exe_path
+            }
+        } else {
+            exe_path
+        };
 
         Ok(ProcessInfo {
             pid,
             name,
             exe_path,
+            proc_exe_path,
         })
     }
 
@@ -46,6 +61,12 @@ impl ProcessInfo {
 
     pub fn exe_path(&self) -> &PathBuf {
         &self.exe_path
+    }
+
+    /// Get /proc/[pid]/exe path - use this for reading binary content
+    /// Works even if the original binary was deleted/rebuilt
+    pub fn proc_exe_path(&self) -> &PathBuf {
+        &self.proc_exe_path
     }
 
     /// Get all thread IDs for this process

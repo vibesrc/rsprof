@@ -1,5 +1,5 @@
-use super::app::{App, ChartType, Focus};
-use crate::storage::CpuEntry;
+use super::app::{App, ChartType, Focus, ViewMode};
+use crate::storage::{CpuEntry, HeapEntry};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -28,6 +28,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    // Split header: left (status) | right (tabs)
+    let chunks = Layout::horizontal([
+        Constraint::Min(40),
+        Constraint::Length(22), // "[CPU] [Memory] [Both]"
+    ])
+    .split(area);
+
+    render_header_status(frame, app, chunks[0]);
+    render_header_tabs(frame, app, chunks[1]);
+}
+
+fn render_header_status(frame: &mut Frame, app: &App, area: Rect) {
     let elapsed = app.elapsed();
     let hours = elapsed.as_secs() / 3600;
     let minutes = (elapsed.as_secs() % 3600) / 60;
@@ -68,6 +80,26 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn render_header_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let active_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+    let inactive_style = Style::default().fg(Color::DarkGray);
+
+    let cpu_style = if app.view_mode == ViewMode::Cpu { active_style } else { inactive_style };
+    let mem_style = if app.view_mode == ViewMode::Memory { active_style } else { inactive_style };
+    let both_style = if app.view_mode == ViewMode::Both { active_style } else { inactive_style };
+
+    let tabs = Line::from(vec![
+        Span::styled("[CPU]", cpu_style),
+        Span::raw(" "),
+        Span::styled("[Memory]", mem_style),
+        Span::raw(" "),
+        Span::styled("[Both]", both_style),
+    ]);
+
+    let paragraph = Paragraph::new(tabs);
+    frame.render_widget(paragraph, area);
+}
+
 fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
     // Split: left table (60%) | right chart (40%)
     let chunks = Layout::default()
@@ -84,8 +116,22 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let entries = app.entries();
     let elapsed_secs = app.elapsed_secs();
-    render_cpu_table(frame, app, entries, chunks[0]);
-    render_line_chart(frame, app, elapsed_secs, chunks[1]);
+
+    match app.view_mode {
+        ViewMode::Cpu => {
+            render_cpu_table(frame, app, entries, chunks[0]);
+            render_line_chart(frame, app, elapsed_secs, chunks[1]);
+        }
+        ViewMode::Memory => {
+            let heap_entries = app.heap_entries();
+            render_memory_table(frame, app, heap_entries, chunks[0]);
+            render_memory_chart_placeholder(frame, app, chunks[1]);
+        }
+        ViewMode::Both => {
+            render_combined_table(frame, app, entries, chunks[0]);
+            render_stacked_charts(frame, app, elapsed_secs, chunks[1]);
+        }
+    }
 }
 
 fn render_cpu_table(frame: &mut Frame, app: &App, entries: &[CpuEntry], area: Rect) {
@@ -172,6 +218,278 @@ fn render_cpu_table(frame: &mut Frame, app: &App, entries: &[CpuEntry], area: Re
         };
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
+}
+
+fn render_memory_table(frame: &mut Frame, app: &App, entries: &[HeapEntry], area: Rect) {
+    let border_color = if app.focus == Focus::Table {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    // Show different title based on whether we have data
+    let title = if entries.is_empty() {
+        if app.has_heap_profiling() {
+            " Top Memory (no data yet) "
+        } else {
+            " Top Memory (eBPF unavailable) "
+        }
+    } else {
+        " Top Memory "
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    if entries.is_empty() {
+        // Show placeholder message when no data
+        let msg = if app.has_heap_profiling() {
+            "Waiting for allocation data..."
+        } else {
+            "Heap profiling requires root/CAP_BPF"
+        };
+        let text = vec![
+            Line::from(""),
+            Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))),
+        ];
+        let paragraph = Paragraph::new(text).block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let header_cells = ["Alloc", "Free", "Live", "Location", "Function"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+    let header = Row::new(header_cells).height(1);
+
+    let selected = app.selected_row().min(entries.len().saturating_sub(1));
+    let visible_height = area.height.saturating_sub(3) as usize;
+
+    let max_scroll = entries.len().saturating_sub(visible_height.max(1));
+    let scroll_offset = app.scroll_offset().min(max_scroll);
+
+    let rows: Vec<Row> = entries
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height.max(1))
+        .map(|(i, entry)| {
+            let alloc_str = format_bytes(entry.total_alloc_bytes);
+            let free_str = format_bytes(entry.total_free_bytes);
+            let live_str = format_bytes(entry.live_bytes);
+            let location = format_location(&entry.file, entry.line);
+            let function = format_function(&entry.function);
+
+            let style = if i == selected {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(alloc_str).style(Style::default().fg(Color::Red)),
+                Cell::from(free_str).style(Style::default().fg(Color::Green)),
+                Cell::from(live_str).style(Style::default().fg(Color::Yellow)),
+                Cell::from(location),
+                Cell::from(function),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Percentage(25),
+        Constraint::Percentage(45),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block);
+
+    frame.render_widget(table, area);
+
+    // Render scrollbar if there are more entries than visible
+    if entries.len() > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::new(entries.len())
+            .position(scroll_offset);
+
+        let scrollbar_area = Rect {
+            x: area.x + area.width - 1,
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+}
+
+fn render_memory_chart_placeholder(frame: &mut Frame, app: &App, area: Rect) {
+    let border_color = if app.focus == Focus::Chart {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    let block = Block::default()
+        .title(" Memory Over Time ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "No memory data available",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_combined_table(frame: &mut Frame, app: &App, entries: &[CpuEntry], area: Rect) {
+    let border_color = if app.focus == Focus::Table {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    let sort_indicator = match app.sort_column {
+        super::app::SortColumn::Cpu => "▼CPU",
+        super::app::SortColumn::Memory => "▼Mem",
+    };
+
+    let block = Block::default()
+        .title(format!(" Both ({}) ", sort_indicator))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    // Headers: CPU% | Now% | Mem | Now | Location | Function
+    // Mirrors CPU's Total/Now pattern for memory columns
+    let header_cells = ["CPU%", "Now%", "Mem", "Now", "Location", "Function"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+    let header = Row::new(header_cells).height(1);
+
+    let selected = app.selected_row().min(entries.len().saturating_sub(1));
+    let visible_height = area.height.saturating_sub(3) as usize;
+    let max_scroll = entries.len().saturating_sub(visible_height.max(1));
+    let scroll_offset = app.scroll_offset().min(max_scroll);
+
+    // TODO: When heap sampler is integrated, use query_combined_live() to get CombinedEntry
+    // which has both CPU and memory data merged by location.
+    // For now, show CPU data with placeholder memory columns.
+    //
+    // Memory columns (mirrors CPU's Total/Now pattern):
+    //   Mem:  Total allocations for this location over all time (format_bytes)
+    //   Now:  Current slice's live bytes at this checkpoint (format_bytes)
+    let rows: Vec<Row> = entries
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height.max(1))
+        .map(|(i, entry)| {
+            let cpu_total = format!("{:5.1}%", entry.total_percent);
+            let cpu_now = format!("{:5.1}%", entry.instant_percent);
+
+            // Placeholder values - will be replaced with CombinedEntry data
+            // Example of what real data would look like:
+            //   let mem_total = format_bytes(combined_entry.heap_total);
+            //   let mem_now = format_bytes(combined_entry.heap_instant);
+            let heap_total: i64 = 0; // Placeholder
+            let heap_instant: i64 = 0; // Placeholder
+            let mem_total = if heap_total > 0 {
+                format_bytes(heap_total)
+            } else {
+                "—".to_string()
+            };
+            let mem_now = if heap_instant > 0 {
+                format_bytes(heap_instant)
+            } else {
+                "—".to_string()
+            };
+
+            let location = format_location(&entry.file, entry.line);
+            let function = format_function(&entry.function);
+
+            let style = if i == selected {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(cpu_total).style(Style::default().fg(color_for_percent(entry.total_percent))),
+                Cell::from(cpu_now).style(Style::default().fg(color_for_percent(entry.instant_percent))),
+                Cell::from(mem_total).style(Style::default().fg(color_for_bytes(heap_total))),
+                Cell::from(mem_now).style(Style::default().fg(color_for_bytes(heap_instant))),
+                Cell::from(location),
+                Cell::from(function),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(7),  // CPU%
+        Constraint::Length(7),  // Now%
+        Constraint::Length(8),  // Mem
+        Constraint::Length(8),  // ΔMem
+        Constraint::Percentage(25), // Location
+        Constraint::Percentage(35), // Function
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block);
+
+    frame.render_widget(table, area);
+
+    // Render scrollbar if there are more entries than visible
+    if entries.len() > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::new(entries.len())
+            .position(scroll_offset);
+
+        let scrollbar_area = Rect {
+            x: area.x + area.width - 1,
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+}
+
+fn render_stacked_charts(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: Rect) {
+    // Split chart area vertically: CPU (top) | Memory (bottom)
+    let chunks = Layout::vertical([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(area);
+
+    // Render CPU chart in top half
+    render_line_chart(frame, app, elapsed_secs, chunks[0]);
+
+    // Render Memory chart placeholder in bottom half
+    render_memory_chart_placeholder(frame, app, chunks[1]);
 }
 
 fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: Rect) {
@@ -329,6 +647,37 @@ fn strip_hash_suffix(name: &str) -> String {
     name.to_string()
 }
 
+/// Format bytes into human-readable units (B, KB, MB, GB, TB)
+fn format_bytes(bytes: i64) -> String {
+    let abs_bytes = bytes.abs() as f64;
+    let sign = if bytes < 0 { "-" } else { "" };
+
+    if abs_bytes >= 1_099_511_627_776.0 {
+        format!("{}{:.1}TB", sign, abs_bytes / 1_099_511_627_776.0)
+    } else if abs_bytes >= 1_073_741_824.0 {
+        format!("{}{:.1}GB", sign, abs_bytes / 1_073_741_824.0)
+    } else if abs_bytes >= 1_048_576.0 {
+        format!("{}{:.1}MB", sign, abs_bytes / 1_048_576.0)
+    } else if abs_bytes >= 1024.0 {
+        format!("{}{:.1}KB", sign, abs_bytes / 1024.0)
+    } else {
+        format!("{}{}B", sign, bytes.abs())
+    }
+}
+
+/// Color for memory amount based on size
+fn color_for_bytes(bytes: i64) -> Color {
+    if bytes >= 100_000_000 { // 100MB+
+        Color::Red
+    } else if bytes >= 10_000_000 { // 10MB+
+        Color::Yellow
+    } else if bytes >= 1_000_000 { // 1MB+
+        Color::Green
+    } else {
+        Color::White
+    }
+}
+
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(" q ", Style::default().bg(Color::DarkGray)),
@@ -343,6 +692,16 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     spans.push(Span::styled(" Tab ", Style::default().bg(Color::DarkGray)));
     spans.push(Span::raw(" focus "));
+
+    // View mode hint
+    spans.push(Span::styled(" m ", Style::default().bg(Color::DarkGray)));
+    spans.push(Span::raw(" mode "));
+
+    // Show sort hint in Both mode
+    if app.view_mode == ViewMode::Both {
+        spans.push(Span::styled(" s ", Style::default().bg(Color::DarkGray)));
+        spans.push(Span::raw(" sort "));
+    }
 
     // Show context-sensitive help based on focus
     if app.focus == Focus::Table {

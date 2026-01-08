@@ -10,6 +10,9 @@ use std::time::Instant;
 /// Key for aggregating samples: (file, line, function)
 type LocationKey = (String, u32, String);
 
+/// Pending heap sample data: (alloc_bytes, free_bytes, live_bytes)
+type HeapSampleData = (i64, i64, i64);
+
 /// Storage writer for profiling data
 pub struct Storage {
     conn: Connection,
@@ -17,6 +20,8 @@ pub struct Storage {
     checkpoint_id: i64,
     /// Pending CPU samples: location_id -> count
     pending_cpu: HashMap<i64, u64>,
+    /// Pending heap samples: location_id -> (alloc_bytes, free_bytes, live_bytes)
+    pending_heap: HashMap<i64, HeapSampleData>,
     /// Cache: (file, line, function) -> location_id
     location_cache: HashMap<LocationKey, i64>,
 }
@@ -59,6 +64,7 @@ impl Storage {
             start_time: Instant::now(),
             checkpoint_id: 0,
             pending_cpu: HashMap::new(),
+            pending_heap: HashMap::new(),
             location_cache: HashMap::new(),
         })
     }
@@ -93,9 +99,24 @@ impl Storage {
         *self.pending_cpu.entry(location_id).or_insert(0) += 1;
     }
 
+    /// Record a heap sample (aggregates by location_id)
+    pub fn record_heap_sample(
+        &mut self,
+        location: &Location,
+        alloc_bytes: i64,
+        free_bytes: i64,
+        live_bytes: i64,
+    ) {
+        let location_id = self.get_location_id(location);
+        let entry = self.pending_heap.entry(location_id).or_insert((0, 0, 0));
+        entry.0 += alloc_bytes;
+        entry.1 += free_bytes;
+        entry.2 = live_bytes; // live_bytes is a snapshot, not cumulative
+    }
+
     /// Flush pending data to a new checkpoint
     pub fn flush_checkpoint(&mut self) -> Result<()> {
-        if self.pending_cpu.is_empty() {
+        if self.pending_cpu.is_empty() && self.pending_heap.is_empty() {
             return Ok(());
         }
 
@@ -120,6 +141,23 @@ impl Storage {
                     self.checkpoint_id,
                     location_id,
                     count as i64
+                ])?;
+            }
+        }
+
+        // Insert heap samples
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO heap_samples (checkpoint_id, location_id, alloc_bytes, free_bytes, live_bytes) VALUES (?, ?, ?, ?, ?)",
+            )?;
+
+            for (location_id, (alloc, free, live)) in self.pending_heap.drain() {
+                stmt.execute(rusqlite::params![
+                    self.checkpoint_id,
+                    location_id,
+                    alloc,
+                    free,
+                    live
                 ])?;
             }
         }
@@ -154,6 +192,27 @@ impl Storage {
     /// Query top CPU consumers - cumulative only (for `top` command)
     pub fn query_top_cpu(&self, limit: usize) -> Vec<CpuEntry> {
         query_top_cpu(&self.conn, limit, 0.0).unwrap_or_default()
+    }
+
+    /// Query top heap consumers with live bytes and delta
+    pub fn query_top_heap_live(&self, limit: usize) -> Vec<HeapEntry> {
+        query_top_heap_live(&self.conn, limit).unwrap_or_default()
+    }
+
+    /// Query combined CPU + Heap data for "Both" view
+    pub fn query_combined_live(&self, limit: usize) -> Vec<CombinedEntry> {
+        query_combined_live(&self.conn, limit).unwrap_or_default()
+    }
+
+    /// Query heap time series aggregated into buckets
+    pub fn query_heap_timeseries_aggregated(
+        &self,
+        location_id: i64,
+        start_ms: i64,
+        end_ms: i64,
+        num_buckets: usize,
+    ) -> Vec<(f64, f64)> {
+        query_heap_timeseries_aggregated(&self.conn, location_id, start_ms, end_ms, num_buckets)
     }
 
     /// Query time series for a specific location (time_sec, cpu_pct)
@@ -251,6 +310,33 @@ pub struct CpuEntry {
     pub total_samples: u64,
     pub total_percent: f64,
     pub instant_percent: f64,
+}
+
+/// Query results for top heap consumers
+#[derive(Debug, Clone)]
+pub struct HeapEntry {
+    pub location_id: i64,
+    pub file: String,
+    pub line: u32,
+    pub function: String,
+    pub live_bytes: i64,
+    pub total_alloc_bytes: i64,
+    pub total_free_bytes: i64,
+}
+
+/// Combined CPU + Heap entry for "Both" view
+#[derive(Debug, Clone)]
+pub struct CombinedEntry {
+    pub location_id: i64,
+    pub file: String,
+    pub line: u32,
+    pub function: String,
+    pub cpu_total_pct: f64,
+    pub cpu_instant_pct: f64,
+    /// Total heap allocations over all time (sum of alloc_bytes)
+    pub heap_total: i64,
+    /// Current slice heap usage (live_bytes at current checkpoint)
+    pub heap_instant: i64,
 }
 
 /// Time-series data point for a function
@@ -475,4 +561,195 @@ pub fn query_top_cpu(
     }
 
     Ok(entries)
+}
+
+/// Query top heap consumers with totals
+pub fn query_top_heap_live(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<HeapEntry>> {
+    // Get the most recent checkpoint for live_bytes
+    let last_checkpoint: Option<i64> = conn.query_row(
+        "SELECT id FROM checkpoints ORDER BY timestamp_ms DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).ok();
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            l.id, l.file, l.line, l.function,
+            COALESCE((
+                SELECT live_bytes FROM heap_samples
+                WHERE location_id = l.id AND checkpoint_id = ?1
+            ), 0) as live,
+            SUM(hs.alloc_bytes) as total_alloc,
+            SUM(hs.free_bytes) as total_free
+        FROM heap_samples hs
+        JOIN locations l ON hs.location_id = l.id
+        GROUP BY hs.location_id
+        ORDER BY total_alloc DESC
+        LIMIT ?2
+        "#,
+    )?;
+
+    let cp_id = last_checkpoint.unwrap_or(0);
+    let rows = stmt.query_map(rusqlite::params![cp_id, limit as i64], |row| {
+        Ok(HeapEntry {
+            location_id: row.get(0)?,
+            file: row.get(1)?,
+            line: row.get::<_, i64>(2)? as u32,
+            function: row.get(3)?,
+            live_bytes: row.get(4)?,
+            total_alloc_bytes: row.get(5)?,
+            total_free_bytes: row.get(6)?,
+        })
+    })?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+
+    Ok(entries)
+}
+
+/// Query combined CPU + Heap data for "Both" view
+pub fn query_combined_live(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<CombinedEntry>> {
+    // Get CPU totals
+    let cpu_grand_total: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(count), 0.0) FROM cpu_samples",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Get last checkpoint for instant values
+    let last_checkpoint: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM checkpoints ORDER BY timestamp_ms DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let cpu_instant_total: f64 = if let Some(cp_id) = last_checkpoint {
+        conn.query_row(
+            "SELECT COALESCE(SUM(count), 0.0) FROM cpu_samples WHERE checkpoint_id = ?",
+            [cp_id],
+            |row| row.get(0),
+        )?
+    } else {
+        0.0
+    };
+
+    // Combined query joining CPU and Heap data
+    // heap_total = sum of all allocations over time (alloc_bytes)
+    // heap_instant = current slice's live bytes (live_bytes at current checkpoint)
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            l.id, l.file, l.line, l.function,
+            COALESCE((SELECT SUM(count) FROM cpu_samples WHERE location_id = l.id), 0) as cpu_total,
+            COALESCE((SELECT count FROM cpu_samples WHERE location_id = l.id AND checkpoint_id = ?1), 0) as cpu_instant,
+            COALESCE((SELECT SUM(alloc_bytes) FROM heap_samples WHERE location_id = l.id), 0) as heap_total,
+            COALESCE((SELECT live_bytes FROM heap_samples WHERE location_id = l.id AND checkpoint_id = ?1), 0) as heap_instant
+        FROM locations l
+        WHERE l.id IN (
+            SELECT DISTINCT location_id FROM cpu_samples
+            UNION
+            SELECT DISTINCT location_id FROM heap_samples
+        )
+        ORDER BY cpu_total DESC
+        LIMIT ?2
+        "#,
+    )?;
+
+    let cp_id = last_checkpoint.unwrap_or(0);
+
+    let rows = stmt.query_map(rusqlite::params![cp_id, limit as i64], |row| {
+        let cpu_total: i64 = row.get(4)?;
+        let cpu_instant: i64 = row.get(5)?;
+        let heap_total: i64 = row.get(6)?;
+        let heap_instant: i64 = row.get(7)?;
+
+        Ok(CombinedEntry {
+            location_id: row.get(0)?,
+            file: row.get(1)?,
+            line: row.get::<_, i64>(2)? as u32,
+            function: row.get(3)?,
+            cpu_total_pct: if cpu_grand_total > 0.0 {
+                (cpu_total as f64 / cpu_grand_total) * 100.0
+            } else {
+                0.0
+            },
+            cpu_instant_pct: if cpu_instant_total > 0.0 {
+                (cpu_instant as f64 / cpu_instant_total) * 100.0
+            } else {
+                0.0
+            },
+            heap_total,
+            heap_instant,
+        })
+    })?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+
+    Ok(entries)
+}
+
+/// Query heap bytes over time aggregated into buckets (for chart rendering)
+pub fn query_heap_timeseries_aggregated(
+    conn: &Connection,
+    location_id: i64,
+    start_ms: i64,
+    end_ms: i64,
+    num_buckets: usize,
+) -> Vec<(f64, f64)> {
+    if num_buckets == 0 || start_ms >= end_ms {
+        return Vec::new();
+    }
+
+    let bucket_ms = (end_ms - start_ms) / num_buckets as i64;
+    if bucket_ms == 0 {
+        return Vec::new();
+    }
+
+    let query_result: rusqlite::Result<Vec<(f64, f64)>> = (|| {
+        let mut stmt = conn.prepare(
+            r#"
+            WITH bucket_data AS (
+                SELECT
+                    ((c.timestamp_ms - ?2) / ?4) as bucket_idx,
+                    hs.live_bytes
+                FROM checkpoints c
+                JOIN heap_samples hs ON hs.checkpoint_id = c.id AND hs.location_id = ?1
+                WHERE c.timestamp_ms >= ?2 AND c.timestamp_ms < ?3
+            )
+            SELECT bucket_idx, MAX(live_bytes) as max_bytes
+            FROM bucket_data
+            GROUP BY bucket_idx
+            ORDER BY bucket_idx ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![location_id, start_ms, end_ms, bucket_ms],
+            |row| {
+                let bucket_idx: i64 = row.get(0)?;
+                let bytes: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+                let time_ms = start_ms + bucket_idx * bucket_ms + bucket_ms / 2;
+                Ok((time_ms as f64 / 1000.0, bytes as f64))
+            },
+        )?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })();
+
+    query_result.unwrap_or_default()
 }

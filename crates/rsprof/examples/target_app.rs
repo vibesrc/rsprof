@@ -9,14 +9,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-// Use the profiling allocator for heap tracking
-#[global_allocator]
-static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
+// Enable CPU + heap profiling with one line
+rsprof_trace::profiler!();
 
 fn main() {
-    // Start CPU profiling at 99Hz
-    rsprof_trace::start_cpu_profiling(99);
-
     println!("=== Cache Service Demo ===");
     println!("PID: {}", std::process::id());
     println!();

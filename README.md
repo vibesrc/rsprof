@@ -22,21 +22,18 @@ rsprof-trace = { version = "0.1", features = ["profiling"] }
 ### 2. Instrument your code
 
 ```rust
-// Heap profiling: just set the global allocator (starts automatically)
-#[global_allocator]
-static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
+// One line enables CPU + heap profiling
+rsprof_trace::profiler!();
 
 fn main() {
-    // CPU profiling: must be started explicitly
-    rsprof_trace::start_cpu_profiling(99);
-
     // Your application code...
 }
 ```
 
-> **Note**: Heap profiling starts automatically when you use `ProfilingAllocator`.
-> CPU profiling requires an explicit `start_cpu_profiling()` call because it sets up
-> a signal handler at runtime.
+Or customize the CPU sampling frequency:
+```rust
+rsprof_trace::profiler!(cpu = 199);  // 199Hz instead of default 99Hz
+```
 
 ### 3. Build with frame pointers
 
@@ -136,23 +133,25 @@ rsprof query profile.db "SELECT * FROM cpu_samples LIMIT 10"
 
 ## rsprof-trace Features
 
-The `rsprof-trace` crate supports selective profiling:
+The `rsprof-trace` crate supports conditional compilation:
 
 ```toml
-# CPU + Heap (default with "profiling")
+# Profiling enabled (CPU + Heap)
 rsprof-trace = { version = "0.1", features = ["profiling"] }
 
-# CPU only
-rsprof-trace = { version = "0.1", features = ["cpu"] }
-
-# Heap only
-rsprof-trace = { version = "0.1", features = ["heap"] }
-
-# Disabled (zero-cost, for conditional compilation)
+# Disabled (zero-cost passthrough)
 rsprof-trace = { version = "0.1" }
 ```
 
-When no features are enabled, all profiling calls become no-ops and the allocator is a direct passthrough to the system allocator.
+When no features are enabled, `profiler!()` expands to nothing and has zero overhead. This lets you keep the instrumentation in your code and toggle profiling at build time:
+
+```bash
+# Production build - no profiling
+cargo build --release
+
+# Profiling build
+cargo build --release --features profiling
+```
 
 ## Memory Profiling
 

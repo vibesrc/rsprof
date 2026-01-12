@@ -12,29 +12,23 @@
 //! rsprof-trace = { version = "0.1", features = ["profiling"] }
 //! ```
 //!
-//! For CPU profiling only:
+//! Enable profiling with the `profiler!` macro:
 //! ```rust,ignore
-//! fn main() {
-//!     // Start CPU profiling at 99Hz
-//!     rsprof_trace::start_cpu_profiling(99);
-//!
-//!     // Your application code...
-//!
-//!     // Stop profiling (optional, stops on process exit)
-//!     rsprof_trace::stop_cpu_profiling();
-//! }
+//! rsprof_trace::profiler!();  // CPU at 99Hz + heap profiling
 //! ```
 //!
-//! For heap profiling, use the global allocator:
+//! Or customize the CPU sampling frequency:
 //! ```rust,ignore
-//! #[global_allocator]
-//! static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
+//! rsprof_trace::profiler!(cpu = 199);  // CPU at 199Hz + heap profiling
 //! ```
 //!
 //! Build with frame pointers for accurate stack traces:
 //! ```bash
 //! RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --features profiling
 //! ```
+//!
+//! When the `profiling` feature is disabled, the macro expands to a no-op
+//! allocator passthrough with zero overhead.
 
 #![no_std]
 
@@ -59,17 +53,37 @@ pub fn stop_cpu_profiling() {}
 
 /// A profiling allocator that wraps the system allocator.
 ///
+/// The const generic `CPU_FREQ` specifies the CPU sampling frequency in Hz.
+/// Set to 0 to disable CPU profiling.
+///
 /// When the `heap` feature is enabled, this allocator captures
 /// allocation and deallocation events along with stack traces.
-/// When disabled, it's a zero-cost passthrough to the system allocator.
-pub struct ProfilingAllocator;
+/// CPU profiling (if enabled) starts automatically on the first allocation.
+///
+/// When profiling features are disabled, it's a zero-cost passthrough.
+pub struct ProfilingAllocator<const CPU_FREQ: u32 = 99>;
+
+impl<const CPU_FREQ: u32> ProfilingAllocator<CPU_FREQ> {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl<const CPU_FREQ: u32> Default for ProfilingAllocator<CPU_FREQ> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Legacy alias for backwards compatibility
+pub type HeapProfiler = ProfilingAllocator<99>;
 
 #[cfg(not(feature = "heap"))]
 mod disabled {
     use super::ProfilingAllocator;
     use core::alloc::{GlobalAlloc, Layout};
 
-    unsafe impl GlobalAlloc for ProfilingAllocator {
+    unsafe impl<const CPU_FREQ: u32> GlobalAlloc for ProfilingAllocator<CPU_FREQ> {
         #[inline]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             unsafe { libc::malloc(layout.size()) as *mut u8 }
@@ -94,42 +108,103 @@ mod disabled {
 
 #[cfg(feature = "heap")]
 mod enabled {
-    use super::{ProfilingAllocator, profiling};
+    use super::ProfilingAllocator;
+    #[cfg(feature = "cpu")]
+    use super::profiling::start_cpu_profiling;
+    use super::profiling::{record_alloc, record_dealloc};
     use core::alloc::{GlobalAlloc, Layout};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    unsafe impl GlobalAlloc for ProfilingAllocator {
+    static CPU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+    #[inline]
+    fn maybe_init_cpu<const FREQ: u32>() {
+        #[cfg(feature = "cpu")]
+        {
+            if FREQ > 0 && !CPU_INITIALIZED.swap(true, Ordering::SeqCst) {
+                start_cpu_profiling(FREQ);
+            }
+        }
+    }
+
+    unsafe impl<const CPU_FREQ: u32> GlobalAlloc for ProfilingAllocator<CPU_FREQ> {
         #[inline]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            maybe_init_cpu::<CPU_FREQ>();
             let ptr = unsafe { libc::malloc(layout.size()) as *mut u8 };
             if !ptr.is_null() {
-                profiling::record_alloc(ptr, layout.size());
+                record_alloc(ptr, layout.size());
             }
             ptr
         }
 
         #[inline]
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            profiling::record_dealloc(ptr, layout.size());
+            record_dealloc(ptr, layout.size());
             unsafe { libc::free(ptr as *mut libc::c_void) }
         }
 
         #[inline]
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            profiling::record_dealloc(ptr, layout.size());
+            record_dealloc(ptr, layout.size());
             let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
             if !new_ptr.is_null() {
-                profiling::record_alloc(new_ptr, new_size);
+                record_alloc(new_ptr, new_size);
             }
             new_ptr
         }
 
         #[inline]
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            maybe_init_cpu::<CPU_FREQ>();
             let ptr = unsafe { libc::calloc(1, layout.size()) as *mut u8 };
             if !ptr.is_null() {
-                profiling::record_alloc(ptr, layout.size());
+                record_alloc(ptr, layout.size());
             }
             ptr
         }
     }
+}
+
+/// Enable profiling for your application.
+///
+/// This macro sets up both CPU and heap profiling with sensible defaults.
+/// CPU profiling starts automatically on the first allocation.
+/// When the `profiling` feature is disabled, it expands to a zero-cost no-op.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Default: CPU at 99Hz + heap profiling
+/// rsprof_trace::profiler!();
+///
+/// // Custom CPU frequency
+/// rsprof_trace::profiler!(cpu = 199);
+/// ```
+///
+/// # Build
+///
+/// Enable profiling at build time:
+/// ```bash
+/// RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --features profiling
+/// ```
+#[macro_export]
+#[cfg(feature = "heap")]
+macro_rules! profiler {
+    () => {
+        $crate::profiler!(cpu = 99);
+    };
+    (cpu = $freq:expr) => {
+        #[global_allocator]
+        static __RSPROF_ALLOC: $crate::ProfilingAllocator<$freq> =
+            $crate::ProfilingAllocator::<$freq>::new();
+    };
+}
+
+/// No-op when heap feature is disabled (CPU-only not supported with this macro)
+#[macro_export]
+#[cfg(not(feature = "heap"))]
+macro_rules! profiler {
+    () => {};
+    (cpu = $freq:expr) => {};
 }

@@ -14,6 +14,21 @@ mod heap_skel {
 
 use heap_skel::*;
 
+/// Number of stack frames to use for keying
+/// Must be large enough to include user frames after allocator internals
+const STACK_KEY_FRAMES: usize = 16;
+
+/// Compute a hash key from the first few stack frames.
+fn stack_key(stack: &[u64]) -> u64 {
+    let mut key = 0u64;
+    for (i, &addr) in stack.iter().take(STACK_KEY_FRAMES).enumerate() {
+        key ^= addr;
+        key = key.wrapping_mul(0x100000001b3);
+        key ^= i as u64;
+    }
+    key
+}
+
 /// Stats per callsite (mirrors eBPF struct)
 #[derive(Debug, Clone, Default)]
 pub struct HeapStats {
@@ -246,9 +261,9 @@ impl HeapSampler {
                         }
                     }
                     if !stack.is_empty() {
-                        let key_addr = stack[0];
+                        let key = stack_key(&stack);
                         // Only insert if we don't have this key yet (first wins)
-                        result.entry(key_addr).or_insert(stack);
+                        result.entry(key).or_insert(stack);
                     }
                 }
             }

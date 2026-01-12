@@ -26,6 +26,23 @@ const EVENT_TYPE_ALLOC: u8 = 1;
 const EVENT_TYPE_DEALLOC: u8 = 2;
 const EVENT_TYPE_CPU_SAMPLE: u8 = 3;
 
+/// Number of stack frames to use for keying
+/// Must be large enough to include user frames after allocator internals (~6-8 frames)
+const STACK_KEY_FRAMES: usize = 16;
+
+/// Compute a hash key from the first few stack frames.
+/// This distinguishes different call sites that might share the same immediate return address.
+fn stack_key(stack: &[u64]) -> u64 {
+    let mut key = 0u64;
+    for (i, &addr) in stack.iter().take(STACK_KEY_FRAMES).enumerate() {
+        // Mix each frame address into the key using FNV-1a style mixing
+        key ^= addr;
+        key = key.wrapping_mul(0x100000001b3);
+        key ^= i as u64;
+    }
+    key
+}
+
 /// Ring buffer header (must match rsprof-trace)
 #[repr(C)]
 struct RingBufferHeader {
@@ -187,11 +204,14 @@ impl ShmHeapSampler {
     }
 
     /// Read inline stacks from live allocations
+    /// Uses a hash of the first few stack frames as the key to distinguish
+    /// different call sites that share the same immediate return address.
     pub fn read_inline_stacks(&self) -> HashMap<u64, Vec<u64>> {
         let mut result = HashMap::new();
-        for (_, stack) in self.live_allocs.values() {
+        for (_, (_, stack)) in &self.live_allocs {
             if !stack.is_empty() {
-                result.entry(stack[0]).or_insert_with(|| stack.clone());
+                let key = stack_key(stack);
+                result.entry(key).or_insert_with(|| stack.clone());
             }
         }
         result
@@ -248,7 +268,7 @@ impl ShmHeapSampler {
                 match event_type {
                     TraceEventType::Alloc => {
                         if !stack.is_empty() {
-                            let key = stack[0];
+                            let key = stack_key(&stack);
                             let stats = self.heap_stats.entry(key).or_default();
                             stats.live_bytes += shm_event.size as i64;
                             stats.total_allocs += 1;
@@ -261,7 +281,7 @@ impl ShmHeapSampler {
                         if let Some((size, old_stack)) = self.live_allocs.remove(&shm_event.ptr)
                             && !old_stack.is_empty()
                         {
-                            let key = old_stack[0];
+                            let key = stack_key(&old_stack);
                             if let Some(stats) = self.heap_stats.get_mut(&key) {
                                 stats.live_bytes -= size as i64;
                                 stats.total_frees += 1;

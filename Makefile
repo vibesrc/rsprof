@@ -32,12 +32,12 @@ clean:
 	cargo clean
 	rm -f rsprof.*.db
 
-# Example target app
+# Example target app - debug build for accurate stack traces
 target:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p rsprof --example target_app
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo build -p rsprof --example target_app
 
 run-target: target
-	./target/release/examples/target_app
+	./target/debug/examples/target_app
 
 # Profile the running target app
 PROFILE_DURATION ?= 10s
@@ -67,6 +67,9 @@ top-heap:
 		exit 1; \
 	fi; \
 	./target/release/rsprof top heap $(PROFILE_OUTPUT) --top 100
+
+top-both: top-cpu top-heap
+
 
 top-json:
 	@if [ ! -f $(PROFILE_OUTPUT) ]; then \

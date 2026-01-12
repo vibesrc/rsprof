@@ -10,8 +10,8 @@ use std::time::Instant;
 /// Key for aggregating samples: (file, line, function)
 type LocationKey = (String, u32, String);
 
-/// Pending heap sample data: (alloc_bytes, free_bytes, live_bytes)
-type HeapSampleData = (i64, i64, i64);
+/// Pending heap sample data: (alloc_bytes, free_bytes, live_bytes, alloc_count, free_count)
+type HeapSampleData = (i64, i64, i64, u64, u64);
 
 /// Storage writer for profiling data
 pub struct Storage {
@@ -52,11 +52,7 @@ impl Storage {
             "exe_path",
             &proc_info.exe_path().display().to_string(),
         )?;
-        schema::set_meta(
-            &conn,
-            "start_time",
-            &chrono::Utc::now().to_rfc3339(),
-        )?;
+        schema::set_meta(&conn, "start_time", &chrono::Utc::now().to_rfc3339())?;
         schema::set_meta(&conn, "cpu_freq_hz", &cpu_freq.to_string())?;
 
         Ok(Storage {
@@ -71,23 +67,32 @@ impl Storage {
 
     /// Get or create location_id for a (file, line, function)
     fn get_location_id(&mut self, location: &Location) -> i64 {
-        let key = (location.file.clone(), location.line, location.function.clone());
+        let key = (
+            location.file.clone(),
+            location.line,
+            location.function.clone(),
+        );
 
         if let Some(&id) = self.location_cache.get(&key) {
             return id;
         }
 
         // Insert or get existing
-        self.conn.execute(
-            "INSERT OR IGNORE INTO locations (file, line, function) VALUES (?, ?, ?)",
-            rusqlite::params![&location.file, location.line as i64, &location.function],
-        ).ok();
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO locations (file, line, function) VALUES (?, ?, ?)",
+                rusqlite::params![&location.file, location.line as i64, &location.function],
+            )
+            .ok();
 
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM locations WHERE file = ? AND line = ? AND function = ?",
-            rusqlite::params![&location.file, location.line as i64, &location.function],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let id: i64 = self
+            .conn
+            .query_row(
+                "SELECT id FROM locations WHERE file = ? AND line = ? AND function = ?",
+                rusqlite::params![&location.file, location.line as i64, &location.function],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         self.location_cache.insert(key, id);
         id
@@ -106,12 +111,19 @@ impl Storage {
         alloc_bytes: i64,
         free_bytes: i64,
         live_bytes: i64,
+        alloc_count: u64,
+        free_count: u64,
     ) {
         let location_id = self.get_location_id(location);
-        let entry = self.pending_heap.entry(location_id).or_insert((0, 0, 0));
+        let entry = self
+            .pending_heap
+            .entry(location_id)
+            .or_insert((0, 0, 0, 0, 0));
         entry.0 += alloc_bytes;
         entry.1 += free_bytes;
         entry.2 = live_bytes; // live_bytes is a snapshot, not cumulative
+        entry.3 += alloc_count;
+        entry.4 += free_count;
     }
 
     /// Flush pending data to a new checkpoint
@@ -148,16 +160,19 @@ impl Storage {
         // Insert heap samples
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO heap_samples (checkpoint_id, location_id, alloc_bytes, free_bytes, live_bytes) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO heap_samples (checkpoint_id, location_id, alloc_bytes, free_bytes, live_bytes, alloc_count, free_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )?;
 
-            for (location_id, (alloc, free, live)) in self.pending_heap.drain() {
+            for (location_id, (alloc, free, live, alloc_cnt, free_cnt)) in self.pending_heap.drain()
+            {
                 stmt.execute(rusqlite::params![
                     self.checkpoint_id,
                     location_id,
                     alloc,
                     free,
-                    live
+                    live,
+                    alloc_cnt as i64,
+                    free_cnt as i64
                 ])?;
             }
         }
@@ -168,11 +183,11 @@ impl Storage {
 
     /// Get total samples recorded
     pub fn total_samples(&self) -> Result<u64> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(SUM(count), 0) FROM cpu_samples", [], |row| {
-                row.get(0)
-            })?;
+        let count: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(count), 0) FROM cpu_samples",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(count as u64)
     }
 
@@ -213,6 +228,20 @@ impl Storage {
         num_buckets: usize,
     ) -> Vec<(f64, f64)> {
         query_heap_timeseries_aggregated(&self.conn, location_id, start_ms, end_ms, num_buckets)
+    }
+
+    /// Query sparkline data for all heap locations (recent N checkpoints)
+    pub fn query_heap_sparklines(&self, num_points: usize) -> HashMap<i64, Vec<i64>> {
+        query_heap_sparklines(&self.conn, num_points)
+    }
+
+    /// Query sparkline data for specific locations with zero-fill for missing checkpoints
+    pub fn query_heap_sparklines_for_locations(
+        &self,
+        num_points: usize,
+        location_ids: &[i64],
+    ) -> HashMap<i64, Vec<i64>> {
+        query_heap_sparklines_for_locations(&self.conn, num_points, location_ids)
     }
 
     /// Query time series for a specific location (time_sec, cpu_pct)
@@ -322,6 +351,8 @@ pub struct HeapEntry {
     pub live_bytes: i64,
     pub total_alloc_bytes: i64,
     pub total_free_bytes: i64,
+    pub alloc_count: u64,
+    pub free_count: u64,
 }
 
 /// Combined CPU + Heap entry for "Both" view
@@ -432,10 +463,7 @@ pub fn query_cpu_timeseries_aggregated(
 }
 
 /// Query top CPU consumers with both total and instant percentages (for live TUI)
-pub fn query_top_cpu_live(
-    conn: &Connection,
-    limit: usize,
-) -> rusqlite::Result<Vec<CpuEntry>> {
+pub fn query_top_cpu_live(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<CpuEntry>> {
     // Get totals
     let grand_total: f64 = conn.query_row(
         "SELECT COALESCE(SUM(count), 0.0) FROM cpu_samples",
@@ -564,16 +592,15 @@ pub fn query_top_cpu(
 }
 
 /// Query top heap consumers with totals
-pub fn query_top_heap_live(
-    conn: &Connection,
-    limit: usize,
-) -> rusqlite::Result<Vec<HeapEntry>> {
+pub fn query_top_heap_live(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<HeapEntry>> {
     // Get the most recent checkpoint for live_bytes
-    let last_checkpoint: Option<i64> = conn.query_row(
-        "SELECT id FROM checkpoints ORDER BY timestamp_ms DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).ok();
+    let last_checkpoint: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM checkpoints ORDER BY timestamp_ms DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
     let mut stmt = conn.prepare(
         r#"
@@ -584,7 +611,9 @@ pub fn query_top_heap_live(
                 WHERE location_id = l.id AND checkpoint_id = ?1
             ), 0) as live,
             SUM(hs.alloc_bytes) as total_alloc,
-            SUM(hs.free_bytes) as total_free
+            SUM(hs.free_bytes) as total_free,
+            SUM(hs.alloc_count) as total_alloc_count,
+            SUM(hs.free_count) as total_free_count
         FROM heap_samples hs
         JOIN locations l ON hs.location_id = l.id
         GROUP BY hs.location_id
@@ -603,6 +632,8 @@ pub fn query_top_heap_live(
             live_bytes: row.get(4)?,
             total_alloc_bytes: row.get(5)?,
             total_free_bytes: row.get(6)?,
+            alloc_count: row.get::<_, i64>(7)? as u64,
+            free_count: row.get::<_, i64>(8)? as u64,
         })
     })?;
 
@@ -749,6 +780,134 @@ pub fn query_heap_timeseries_aggregated(
         )?;
 
         Ok(rows.filter_map(|r| r.ok()).collect())
+    })();
+
+    query_result.unwrap_or_default()
+}
+
+/// Query sparkline data for all heap locations (recent N checkpoints)
+/// Returns HashMap<location_id, Vec<live_bytes>> for sparkline rendering
+pub fn query_heap_sparklines(conn: &Connection, num_points: usize) -> HashMap<i64, Vec<i64>> {
+    query_heap_sparklines_for_locations(conn, num_points, &[])
+}
+
+/// Query sparkline data for specific locations (or all if location_ids is empty)
+/// Returns HashMap<location_id, Vec<live_bytes>> with exactly num_points values per location
+/// Missing checkpoints are filled with 0
+pub fn query_heap_sparklines_for_locations(
+    conn: &Connection,
+    num_points: usize,
+    location_ids: &[i64],
+) -> HashMap<i64, Vec<i64>> {
+    let query_result: rusqlite::Result<HashMap<i64, Vec<i64>>> = (|| {
+        // Get the last N checkpoints in chronological order
+        let mut cp_stmt =
+            conn.prepare("SELECT id FROM checkpoints ORDER BY timestamp_ms DESC LIMIT ?")?;
+        let checkpoint_ids: Vec<i64> = cp_stmt
+            .query_map([num_points as i64], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if checkpoint_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Reverse to get chronological order (oldest first)
+        let checkpoint_ids: Vec<i64> = checkpoint_ids.into_iter().rev().collect();
+        let num_checkpoints = checkpoint_ids.len();
+
+        // Create a map from checkpoint_id to index for quick lookup
+        let cp_index: std::collections::HashMap<i64, usize> = checkpoint_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+
+        // Build query based on whether we have specific location_ids
+        let cp_placeholders = checkpoint_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let query = if location_ids.is_empty() {
+            format!(
+                r#"
+                SELECT hs.location_id, hs.checkpoint_id, hs.live_bytes
+                FROM heap_samples hs
+                WHERE hs.checkpoint_id IN ({})
+                "#,
+                cp_placeholders
+            )
+        } else {
+            let loc_placeholders = location_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"
+                SELECT hs.location_id, hs.checkpoint_id, hs.live_bytes
+                FROM heap_samples hs
+                WHERE hs.checkpoint_id IN ({})
+                AND hs.location_id IN ({})
+                "#,
+                cp_placeholders, loc_placeholders
+            )
+        };
+
+        let mut stmt = conn.prepare(&query)?;
+
+        // Build parameter list
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = checkpoint_ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+
+        for loc_id in location_ids {
+            params.push(Box::new(*loc_id));
+        }
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+        // Collect all data points with their checkpoint index
+        let mut raw_data: HashMap<i64, Vec<(usize, i64)>> = HashMap::new();
+
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?, // location_id
+                row.get::<_, i64>(1)?, // checkpoint_id
+                row.get::<_, i64>(2)?, // live_bytes
+            ))
+        })?;
+
+        for row in rows {
+            if let Ok((loc_id, cp_id, live_bytes)) = row
+                && let Some(&idx) = cp_index.get(&cp_id)
+            {
+                raw_data.entry(loc_id).or_default().push((idx, live_bytes));
+            }
+        }
+
+        // Build result with zeros for missing checkpoints
+        let mut result: HashMap<i64, Vec<i64>> = HashMap::new();
+
+        // For specified locations, ensure they all have entries (even if all zeros)
+        for &loc_id in location_ids {
+            result.insert(loc_id, vec![0i64; num_checkpoints]);
+        }
+
+        // Fill in actual data
+        for (loc_id, data_points) in raw_data {
+            let values = result
+                .entry(loc_id)
+                .or_insert_with(|| vec![0i64; num_checkpoints]);
+            for (idx, live_bytes) in data_points {
+                values[idx] = live_bytes;
+            }
+        }
+
+        Ok(result)
     })();
 
     query_result.unwrap_or_default()

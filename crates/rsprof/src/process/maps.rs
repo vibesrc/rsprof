@@ -27,13 +27,11 @@ impl MemoryMaps {
     /// Parse /proc/[pid]/maps
     pub fn for_pid(pid: u32) -> Result<Self> {
         let path = format!("/proc/{}/maps", pid);
-        let content = fs::read_to_string(&path)
-            .map_err(|e| Error::ProcessNotFound(format!("Cannot read maps for PID {}: {}", pid, e)))?;
+        let content = fs::read_to_string(&path).map_err(|e| {
+            Error::ProcessNotFound(format!("Cannot read maps for PID {}: {}", pid, e))
+        })?;
 
-        let mappings = content
-            .lines()
-            .filter_map(Self::parse_line)
-            .collect();
+        let mappings = content.lines().filter_map(Self::parse_line).collect();
 
         Ok(MemoryMaps { mappings })
     }
@@ -77,14 +75,14 @@ impl MemoryMaps {
 
         // Find the first executable mapping of the target binary
         for mapping in &self.mappings {
-            if mapping.is_executable() {
-                if let Some(ref pathname) = mapping.pathname {
-                    if pathname == exe_str.as_ref() || pathname.ends_with(exe_path.file_name().unwrap().to_str().unwrap()) {
-                        // For PIE binaries, the offset is the start address minus the file offset
-                        // Usually the first executable segment starts at 0 in the file
-                        return Ok(mapping.start - mapping.offset);
-                    }
-                }
+            if mapping.is_executable()
+                && let Some(ref pathname) = mapping.pathname
+                && (pathname == exe_str.as_ref()
+                    || pathname.ends_with(exe_path.file_name().unwrap().to_str().unwrap()))
+            {
+                // For PIE binaries, the offset is the start address minus the file offset
+                // Usually the first executable segment starts at 0 in the file
+                return Ok(mapping.start - mapping.offset);
             }
         }
 

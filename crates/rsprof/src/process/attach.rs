@@ -29,8 +29,9 @@ impl ProcessInfo {
 
         // Get executable path from /proc/[pid]/exe
         let proc_exe_path = PathBuf::from(format!("{}/exe", proc_path));
-        let exe_path = fs::read_link(&proc_exe_path)
-            .map_err(|e| Error::PermissionDenied(format!("Cannot read exe for PID {}: {}", pid, e)))?;
+        let exe_path = fs::read_link(&proc_exe_path).map_err(|e| {
+            Error::PermissionDenied(format!("Cannot read exe for PID {}: {}", pid, e))
+        })?;
 
         // Strip " (deleted)" suffix if present (happens when binary was rebuilt)
         let exe_path = if let Some(s) = exe_path.to_str() {
@@ -74,15 +75,14 @@ impl ProcessInfo {
         let task_path = format!("/proc/{}/task", self.pid);
         let mut tids = Vec::new();
 
-        for entry in fs::read_dir(&task_path)
-            .map_err(|e| Error::ProcessNotFound(format!("Cannot read tasks for PID {}: {}", self.pid, e)))?
-        {
-            if let Ok(entry) = entry {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Ok(tid) = name.parse::<u32>() {
-                        tids.push(tid);
-                    }
-                }
+        for entry in fs::read_dir(&task_path).map_err(|e| {
+            Error::ProcessNotFound(format!("Cannot read tasks for PID {}: {}", self.pid, e))
+        })? {
+            if let Ok(entry) = entry
+                && let Some(name) = entry.file_name().to_str()
+                && let Ok(tid) = name.parse::<u32>()
+            {
+                tids.push(tid);
             }
         }
 
@@ -113,7 +113,10 @@ pub fn find_process_by_name(pattern: &str) -> Result<u32> {
     }
 
     match matches.len() {
-        0 => Err(Error::ProcessNotFound(format!("No process matching '{}'", pattern))),
+        0 => Err(Error::ProcessNotFound(format!(
+            "No process matching '{}'",
+            pattern
+        ))),
         1 => Ok(matches[0].0),
         _ => {
             let match_list = matches

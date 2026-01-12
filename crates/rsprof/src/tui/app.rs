@@ -4,11 +4,14 @@ use crate::heap::{HeapSampler, ShmHeapSampler};
 use crate::storage::{CpuEntry, HeapEntry, Storage, query_cpu_timeseries_aggregated};
 use crate::symbols::SymbolResolver;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{prelude::*, Terminal};
+use ratatui::{Terminal, prelude::*};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, stdout};
@@ -42,16 +45,34 @@ use super::ui;
 
 /// Patterns for internal/profiler functions to skip
 const SKIP_FUNCTION_PATTERNS: &[&str] = &[
-    "__rust_alloc", "__rust_dealloc", "__rust_realloc", "__rustc",
-    "alloc::alloc::", "alloc::raw_vec::", "alloc::vec::",
-    "alloc::string::", "alloc::collections::", "<alloc::",
-    "hashbrown::", "std::collections::hash",
-    "core::ptr::", "core::slice::", "core::iter::", "<core::",
+    "__rust_alloc",
+    "__rust_dealloc",
+    "__rust_realloc",
+    "__rustc",
+    "alloc::alloc::",
+    "alloc::raw_vec::",
+    "alloc::vec::",
+    "alloc::string::",
+    "alloc::collections::",
+    "<alloc::",
+    "hashbrown::",
+    "std::collections::hash",
+    "core::ptr::",
+    "core::slice::",
+    "core::iter::",
+    "<core::",
     "core::ops::function::",
-    "_Unwind_", "__cxa_", "_fini", "_init",
-    "addr2line::", "gimli::", "object::", "miniz_oxide::",
+    "_Unwind_",
+    "__cxa_",
+    "_fini",
+    "_init",
+    "addr2line::",
+    "gimli::",
+    "object::",
+    "miniz_oxide::",
     "sort::shared::smallsort::",
-    "rsprof_alloc::", "profiling::", // rsprof-alloc profiler internals
+    "rsprof_alloc::",
+    "profiling::",         // rsprof-alloc profiler internals
     "rust_eh_personality", // exception handling
 ];
 
@@ -72,7 +93,9 @@ fn is_internal_location(loc: &crate::symbols::Location) -> bool {
     if is_internal_file(&loc.file) {
         return true;
     }
-    SKIP_FUNCTION_PATTERNS.iter().any(|p| loc.function.contains(p))
+    SKIP_FUNCTION_PATTERNS
+        .iter()
+        .any(|p| loc.function.contains(p))
 }
 
 /// Find the first "user" frame in a stack trace (not allocator internals)
@@ -82,7 +105,9 @@ fn find_user_frame(stack: &[u64], resolver: &SymbolResolver) -> crate::symbols::
     for &addr in stack {
         let loc = resolver.resolve(addr);
         // Skip internal functions based on name patterns
-        let has_internal_fn = SKIP_FUNCTION_PATTERNS.iter().any(|p| loc.function.contains(p));
+        let has_internal_fn = SKIP_FUNCTION_PATTERNS
+            .iter()
+            .any(|p| loc.function.contains(p));
         if !has_internal_fn && !loc.function.is_empty() && loc.function != "[unknown]" {
             return loc;
         }
@@ -130,18 +155,18 @@ pub enum ViewMode {
 /// Fixed zoom levels with corresponding aggregation bucket sizes
 /// (window_secs, bucket_secs) - bucket is None if no aggregation needed
 const ZOOM_LEVELS: &[(f64, Option<f64>)] = &[
-    (5.0, None),           // 5s  - no aggregation
-    (10.0, None),          // 10s - no aggregation
-    (15.0, None),          // 15s - no aggregation
-    (30.0, None),          // 30s - no aggregation
-    (60.0, None),          // 1m  - no aggregation
-    (300.0, Some(5.0)),    // 5m  - 5s buckets
-    (900.0, Some(15.0)),   // 15m - 15s buckets
-    (1800.0, Some(30.0)),  // 30m - 30s buckets
-    (3600.0, Some(60.0)),  // 1h  - 1m buckets
-    (7200.0, Some(120.0)), // 2h  - 2m buckets
-    (21600.0, Some(300.0)), // 6h  - 5m buckets
-    (43200.0, Some(600.0)), // 12h - 10m buckets
+    (5.0, None),             // 5s  - no aggregation
+    (10.0, None),            // 10s - no aggregation
+    (15.0, None),            // 15s - no aggregation
+    (30.0, None),            // 30s - no aggregation
+    (60.0, None),            // 1m  - no aggregation
+    (300.0, Some(5.0)),      // 5m  - 5s buckets
+    (900.0, Some(15.0)),     // 15m - 15s buckets
+    (1800.0, Some(30.0)),    // 30m - 30s buckets
+    (3600.0, Some(60.0)),    // 1h  - 1m buckets
+    (7200.0, Some(120.0)),   // 2h  - 2m buckets
+    (21600.0, Some(300.0)),  // 6h  - 5m buckets
+    (43200.0, Some(600.0)),  // 12h - 10m buckets
     (86400.0, Some(1200.0)), // 1d  - 20m buckets
 ];
 
@@ -393,11 +418,19 @@ impl App {
 
         // Load metadata
         let total_samples: i64 = conn
-            .query_row("SELECT COALESCE(SUM(count), 0) FROM cpu_samples", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(count), 0) FROM cpu_samples",
+                [],
+                |row| row.get(0),
+            )
             .unwrap_or(0);
 
         let duration_ms: i64 = conn
-            .query_row("SELECT COALESCE(MAX(timestamp_ms), 0) FROM checkpoints", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(timestamp_ms), 0) FROM checkpoints",
+                [],
+                |row| row.get(0),
+            )
             .unwrap_or(0);
 
         let duration_secs = duration_ms as f64 / 1000.0;
@@ -407,15 +440,14 @@ impl App {
         let heap_entries = crate::storage::query_top_heap_live(&conn, 100).unwrap_or_default();
         // For static mode, initialize sparklines from DB and convert to VecDeque
         let heap_location_ids: Vec<i64> = heap_entries.iter().map(|e| e.location_id).collect();
-        let heap_sparklines_vec = crate::storage::query_heap_sparklines_for_locations(&conn, 12, &heap_location_ids);
+        let heap_sparklines_vec =
+            crate::storage::query_heap_sparklines_for_locations(&conn, 12, &heap_location_ids);
         let heap_sparklines: HashMap<i64, VecDeque<i64>> = heap_sparklines_vec
             .into_iter()
             .map(|(k, v)| (k, VecDeque::from(v)))
             .collect();
 
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string());
+        let file_name = path.file_name().map(|n| n.to_string_lossy().to_string());
 
         let mut app = App {
             sampler: None,
@@ -506,7 +538,11 @@ impl App {
 
         // Restore terminal
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
         terminal.show_cursor()?;
 
         result
@@ -515,12 +551,11 @@ impl App {
     fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         while self.running {
             // Check duration limit (live mode only)
-            if !self.is_static() {
-                if let Some(max) = self.max_duration {
-                    if self.start_time.elapsed() >= max {
-                        break;
-                    }
-                }
+            if !self.is_static()
+                && let Some(max) = self.max_duration
+                && self.start_time.elapsed() >= max
+            {
+                break;
             }
 
             // Handle input
@@ -575,9 +610,11 @@ impl App {
             // Live mode: read samples and update
             if !self.is_static() && !self.paused {
                 // Prefer rsprof-trace SHM sampler (provides both CPU and heap)
-                if let (Some(shm), Some(resolver), Some(storage)) =
-                    (self.shm_heap_sampler.as_mut(), self.resolver.as_ref(), self.storage.as_mut())
-                {
+                if let (Some(shm), Some(resolver), Some(storage)) = (
+                    self.shm_heap_sampler.as_mut(),
+                    self.resolver.as_ref(),
+                    self.storage.as_mut(),
+                ) {
                     let _events = shm.poll_events(std::time::Duration::from_millis(1));
 
                     // Process CPU samples from rsprof-trace
@@ -588,7 +625,10 @@ impl App {
                         let location = find_user_frame(&sample.stack, resolver);
                         // Only record if we found a user frame (not internal/library code)
                         if !is_internal_location(&location) {
-                            storage.record_cpu_sample(sample.stack.first().copied().unwrap_or(0), &location);
+                            storage.record_cpu_sample(
+                                sample.stack.first().copied().unwrap_or(0),
+                                &location,
+                            );
                         }
                     }
 
@@ -621,9 +661,11 @@ impl App {
                     }
                 }
                 // Fallback: Use perf-based CPU sampling
-                else if let (Some(sampler), Some(resolver), Some(storage)) =
-                    (self.sampler.as_mut(), self.resolver.as_ref(), self.storage.as_mut())
-                {
+                else if let (Some(sampler), Some(resolver), Some(storage)) = (
+                    self.sampler.as_mut(),
+                    self.resolver.as_ref(),
+                    self.storage.as_mut(),
+                ) {
                     let samples = sampler.read_samples()?;
                     self.total_samples += samples.len() as u64;
 
@@ -642,52 +684,57 @@ impl App {
                 }
 
                 // Fallback: Read heap stats from eBPF (if no SHM sampler)
-                if self.shm_heap_sampler.is_none() {
-                    if let (Some(hs), Some(resolver), Some(storage)) =
-                        (self.heap_sampler.as_ref(), self.resolver.as_ref(), self.storage.as_mut())
-                    {
-                        let heap_stats = hs.read_stats();
-                        let inline_stacks = hs.read_inline_stacks();
+                if self.shm_heap_sampler.is_none()
+                    && let (Some(hs), Some(resolver), Some(storage)) = (
+                        self.heap_sampler.as_ref(),
+                        self.resolver.as_ref(),
+                        self.storage.as_mut(),
+                    )
+                {
+                    let heap_stats = hs.read_stats();
+                    let inline_stacks = hs.read_inline_stacks();
 
-                        for (key_addr, stats) in heap_stats {
-                            let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                                find_user_frame(stack, resolver)
-                            } else {
-                                resolver.resolve(key_addr)
-                            };
-                            // Only record if we found a user frame (not internal/library code)
-                            if !is_internal_location(&location) {
-                                storage.record_heap_sample(
-                                    &location,
-                                    stats.total_alloc_bytes as i64,
-                                    stats.total_free_bytes as i64,
-                                    stats.live_bytes,
-                                    stats.total_allocs,
-                                    stats.total_frees,
-                                );
-                            }
+                    for (key_addr, stats) in heap_stats {
+                        let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                            find_user_frame(stack, resolver)
+                        } else {
+                            resolver.resolve(key_addr)
+                        };
+                        // Only record if we found a user frame (not internal/library code)
+                        if !is_internal_location(&location) {
+                            storage.record_heap_sample(
+                                &location,
+                                stats.total_alloc_bytes as i64,
+                                stats.total_free_bytes as i64,
+                                stats.live_bytes,
+                                stats.total_allocs,
+                                stats.total_frees,
+                            );
                         }
                     }
                 }
             }
 
             // Update entries and selection (live mode queries DB each frame)
-            if !self.is_static() {
-                if let Some(storage) = &self.storage {
-                    self.cached_entries = storage.query_top_cpu_live(100);
-                    self.cached_heap_entries = storage.query_top_heap_live(100);
-                    // Update chart total duration
-                    self.chart_state.total_duration_secs = self.start_time.elapsed().as_secs_f64();
-                }
+            if !self.is_static()
+                && let Some(storage) = &self.storage
+            {
+                self.cached_entries = storage.query_top_cpu_live(100);
+                self.cached_heap_entries = storage.query_top_heap_live(100);
+                // Update chart total duration
+                self.chart_state.total_duration_secs = self.start_time.elapsed().as_secs_f64();
             }
 
             // Update selection state
             if !self.cached_entries.is_empty() {
                 // If we have a selected location, find its current row index
-                if let Some(loc_id) = self.selected_location_id {
-                    if let Some(idx) = self.cached_entries.iter().position(|e| e.location_id == loc_id) {
-                        self.selected_row = idx;
-                    }
+                if let Some(loc_id) = self.selected_location_id
+                    && let Some(idx) = self
+                        .cached_entries
+                        .iter()
+                        .position(|e| e.location_id == loc_id)
+                {
+                    self.selected_row = idx;
                 }
 
                 // Clamp selected row to valid range
@@ -695,7 +742,10 @@ impl App {
 
                 // Clamp scroll offset to valid range
                 let visible_height = self.table_area.height.saturating_sub(3) as usize;
-                let max_scroll = self.cached_entries.len().saturating_sub(visible_height.max(1));
+                let max_scroll = self
+                    .cached_entries
+                    .len()
+                    .saturating_sub(visible_height.max(1));
                 self.scroll_offset = self.scroll_offset.min(max_scroll);
 
                 // Update timeseries for selected function
@@ -757,7 +807,11 @@ impl App {
             KeyCode::Char('c') | KeyCode::Enter => {
                 self.chart_visible = !self.chart_visible;
                 // When showing chart, focus moves to chart; when hiding, focus on table
-                self.focus = if self.chart_visible { Focus::Chart } else { Focus::Table };
+                self.focus = if self.chart_visible {
+                    Focus::Chart
+                } else {
+                    Focus::Table
+                };
             }
 
             // === TABLE CONTROLS (vim-style) ===
@@ -834,7 +888,9 @@ impl App {
                 self.chart_state.zoom_out();
             }
             // 0/^ and $ - start/end
-            KeyCode::Char('0') | KeyCode::Char('^') | KeyCode::Home if self.focus == Focus::Chart => {
+            KeyCode::Char('0') | KeyCode::Char('^') | KeyCode::Home
+                if self.focus == Focus::Chart =>
+            {
                 self.chart_state.pan_to_start();
             }
             KeyCode::Char('$') | KeyCode::End if self.focus == Focus::Chart => {
@@ -906,7 +962,9 @@ impl App {
             // Calculate row index from click position
             // Table has: border (1) + header (1) = 2 rows before data
             let table_header_offset = 2u16;
-            let click_row = y.saturating_sub(self.table_area.y).saturating_sub(table_header_offset);
+            let click_row = y
+                .saturating_sub(self.table_area.y)
+                .saturating_sub(table_header_offset);
 
             // Convert visual row to actual entry index using current scroll offset
             let clicked_index = self.scroll_offset + click_row as usize;
@@ -1032,7 +1090,8 @@ impl App {
         }
 
         // Update CPU sparklines
-        let cpu_current: HashMap<i64, i64> = self.cached_entries
+        let cpu_current: HashMap<i64, i64> = self
+            .cached_entries
             .iter()
             .map(|e| (e.location_id, (e.instant_percent * 1000.0) as i64))
             .collect();
@@ -1045,15 +1104,18 @@ impl App {
         }
 
         for entry in &self.cached_entries {
-            if !self.cached_cpu_sparklines.contains_key(&entry.location_id) {
-                let mut sparkline = VecDeque::with_capacity(SPARKLINE_WIDTH);
-                sparkline.push_back((entry.instant_percent * 1000.0) as i64);
-                self.cached_cpu_sparklines.insert(entry.location_id, sparkline);
-            }
+            self.cached_cpu_sparklines
+                .entry(entry.location_id)
+                .or_insert_with(|| {
+                    let mut sparkline = VecDeque::with_capacity(SPARKLINE_WIDTH);
+                    sparkline.push_back((entry.instant_percent * 1000.0) as i64);
+                    sparkline
+                });
         }
 
         // Update heap sparklines
-        let heap_current: HashMap<i64, i64> = self.cached_heap_entries
+        let heap_current: HashMap<i64, i64> = self
+            .cached_heap_entries
             .iter()
             .map(|e| (e.location_id, e.live_bytes))
             .collect();
@@ -1066,18 +1128,25 @@ impl App {
         }
 
         for entry in &self.cached_heap_entries {
-            if !self.cached_heap_sparklines.contains_key(&entry.location_id) {
-                let mut sparkline = VecDeque::with_capacity(SPARKLINE_WIDTH);
-                sparkline.push_back(entry.live_bytes);
-                self.cached_heap_sparklines.insert(entry.location_id, sparkline);
-            }
+            self.cached_heap_sparklines
+                .entry(entry.location_id)
+                .or_insert_with(|| {
+                    let mut sparkline = VecDeque::with_capacity(SPARKLINE_WIDTH);
+                    sparkline.push_back(entry.live_bytes);
+                    sparkline
+                });
         }
     }
 
     /// Query chart data with DB-level aggregation and caching
     /// Returns data aggregated to match the chart's screen columns
     /// Prefetches 3x the visible window for smooth scrolling
-    pub fn query_chart_data(&mut self, visible_start: f64, visible_end: f64, num_columns: usize) -> &[(f64, f64)] {
+    pub fn query_chart_data(
+        &mut self,
+        visible_start: f64,
+        visible_end: f64,
+        num_columns: usize,
+    ) -> &[(f64, f64)] {
         let location_id = match self.selected_location_id {
             Some(id) => id,
             None => return &[],
@@ -1093,7 +1162,9 @@ impl App {
         let cache_valid = self.chart_data_cache.location_id == Some(location_id)
             && visible_start >= self.chart_data_cache.cache_start_secs
             && visible_end <= self.chart_data_cache.cache_end_secs
-            && (self.chart_data_cache.points_per_sec - points_per_sec).abs() / points_per_sec.max(0.001) < 0.2;
+            && (self.chart_data_cache.points_per_sec - points_per_sec).abs()
+                / points_per_sec.max(0.001)
+                < 0.2;
 
         if !cache_valid {
             // Prefetch 3x the visible window (1 before, visible, 1 after)
@@ -1102,14 +1173,20 @@ impl App {
             let prefetch_range = prefetch_end - prefetch_start;
 
             // Calculate number of buckets for prefetch window
-            let num_buckets = ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
+            let num_buckets =
+                ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
 
             let start_ms = (prefetch_start * 1000.0) as i64;
             let end_ms = (prefetch_end * 1000.0) as i64;
 
             // Query from DB with aggregation
             let data = if let Some(storage) = &self.storage {
-                storage.query_location_timeseries_aggregated(location_id, start_ms, end_ms, num_buckets)
+                storage.query_location_timeseries_aggregated(
+                    location_id,
+                    start_ms,
+                    end_ms,
+                    num_buckets,
+                )
             } else if let Some(conn) = &self.conn {
                 query_cpu_timeseries_aggregated(conn, location_id, start_ms, end_ms, num_buckets)
             } else {
@@ -1162,19 +1239,32 @@ impl App {
 
     /// Get the currently selected heap entry's location_id (for Memory mode)
     pub fn selected_heap_location_id(&self) -> Option<i64> {
-        let selected = self.selected_row.min(self.cached_heap_entries.len().saturating_sub(1));
-        self.cached_heap_entries.get(selected).map(|e| e.location_id)
+        let selected = self
+            .selected_row
+            .min(self.cached_heap_entries.len().saturating_sub(1));
+        self.cached_heap_entries
+            .get(selected)
+            .map(|e| e.location_id)
     }
 
     /// Get the currently selected heap entry's function name (for Memory mode)
     pub fn selected_heap_func(&self) -> Option<&str> {
-        let selected = self.selected_row.min(self.cached_heap_entries.len().saturating_sub(1));
-        self.cached_heap_entries.get(selected).map(|e| e.function.as_str())
+        let selected = self
+            .selected_row
+            .min(self.cached_heap_entries.len().saturating_sub(1));
+        self.cached_heap_entries
+            .get(selected)
+            .map(|e| e.function.as_str())
     }
 
     /// Query heap chart data with DB-level aggregation and caching
     /// Returns data aggregated to match the chart's screen columns
-    pub fn query_heap_chart_data(&mut self, visible_start: f64, visible_end: f64, num_columns: usize) -> &[(f64, f64)] {
+    pub fn query_heap_chart_data(
+        &mut self,
+        visible_start: f64,
+        visible_end: f64,
+        num_columns: usize,
+    ) -> &[(f64, f64)] {
         let location_id = match self.selected_heap_location_id() {
             Some(id) => id,
             None => return &[],
@@ -1187,7 +1277,9 @@ impl App {
         let cache_valid = self.heap_chart_cache.location_id == Some(location_id)
             && visible_start >= self.heap_chart_cache.cache_start_secs
             && visible_end <= self.heap_chart_cache.cache_end_secs
-            && (self.heap_chart_cache.points_per_sec - points_per_sec).abs() / points_per_sec.max(0.001) < 0.2;
+            && (self.heap_chart_cache.points_per_sec - points_per_sec).abs()
+                / points_per_sec.max(0.001)
+                < 0.2;
 
         if !cache_valid {
             // Prefetch 3x the visible window
@@ -1195,7 +1287,8 @@ impl App {
             let prefetch_end = visible_end + visible_range;
             let prefetch_range = prefetch_end - prefetch_start;
 
-            let num_buckets = ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
+            let num_buckets =
+                ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
 
             let start_ms = (prefetch_start * 1000.0) as i64;
             let end_ms = (prefetch_end * 1000.0) as i64;
@@ -1204,7 +1297,13 @@ impl App {
             let data = if let Some(storage) = &self.storage {
                 storage.query_heap_timeseries_aggregated(location_id, start_ms, end_ms, num_buckets)
             } else if let Some(conn) = &self.conn {
-                crate::storage::query_heap_timeseries_aggregated(conn, location_id, start_ms, end_ms, num_buckets)
+                crate::storage::query_heap_timeseries_aggregated(
+                    conn,
+                    location_id,
+                    start_ms,
+                    end_ms,
+                    num_buckets,
+                )
             } else {
                 Vec::new()
             };

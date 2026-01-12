@@ -1,0 +1,18 @@
+[package]
+name = "rsprof-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-instrumentation library for rsprof - captures CPU and heap traces"
+
+[dependencies]
+libc = "0.2"
+
+[features]
+default = []
+# Enable all profiling (heap + cpu)
+profiling = ["heap", "cpu"]
+# Enable heap profiling (allocation tracking)
+heap = []
+# Enable CPU profiling (timer-based self-sampling)
+cpu = []

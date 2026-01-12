@@ -13,9 +13,8 @@ fn build_bpf() {
 
     const SRC: &str = "src/heap/bpf/heap.bpf.c";
 
-    let out_dir = PathBuf::from(
-        env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"),
-    );
+    let out_dir =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
 
     let skel_path = out_dir.join("heap.skel.rs");
 

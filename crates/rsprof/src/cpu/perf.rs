@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use libc::{self, c_int, c_ulong, pid_t, syscall, SYS_perf_event_open};
+use libc::{self, SYS_perf_event_open, c_int, c_ulong, pid_t, syscall};
 use std::fs;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
@@ -187,12 +187,10 @@ impl PerfEvent {
         if fd < 0 {
             let err = std::io::Error::last_os_error();
             return Err(match err.raw_os_error() {
-                Some(libc::EACCES) | Some(libc::EPERM) => {
-                    Error::PermissionDenied(format!(
-                        "Cannot attach to PID {}. Try: sudo sysctl kernel.perf_event_paranoid=1",
-                        pid
-                    ))
-                }
+                Some(libc::EACCES) | Some(libc::EPERM) => Error::PermissionDenied(format!(
+                    "Cannot attach to PID {}. Try: sudo sysctl kernel.perf_event_paranoid=1",
+                    pid
+                )),
                 Some(libc::ESRCH) => Error::ProcessNotFound(format!("PID {}", pid)),
                 _ => Error::PerfEvent(format!("perf_event_open failed: {}", err)),
             });

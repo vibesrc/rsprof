@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Create all tables (drops existing tables first to ensure clean state)
 pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
@@ -54,6 +54,8 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
             alloc_bytes INTEGER NOT NULL DEFAULT 0,
             free_bytes INTEGER NOT NULL DEFAULT 0,
             live_bytes INTEGER NOT NULL DEFAULT 0,
+            alloc_count INTEGER NOT NULL DEFAULT 0,
+            free_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (checkpoint_id, location_id),
             FOREIGN KEY (checkpoint_id) REFERENCES checkpoints(id),
             FOREIGN KEY (location_id) REFERENCES locations(id)

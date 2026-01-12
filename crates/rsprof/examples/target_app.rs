@@ -1,143 +1,225 @@
 //! Example target application for testing rsprof
 //!
-//! Run with: cargo run --example target_app
-//! Then in another terminal: ./target/release/rsprof --pid <PID>
+//! Simulates a service with multiple caches and allocation patterns.
+//!
+//! Build: make target
+//! Run:   make run-target
+//! Profile: make profile (in another terminal)
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+// Use the profiling allocator for heap tracking
+#[global_allocator]
+static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
+
 fn main() {
-    println!("Target app started. PID: {}", std::process::id());
+    // Start CPU profiling at 99Hz
+    rsprof_trace::start_cpu_profiling(99);
+
+    println!("=== Cache Service Demo ===");
+    println!("PID: {}", std::process::id());
+    println!();
+    println!("Simulating a service with multiple allocation patterns.");
     println!("Press Ctrl-C to stop.");
     println!();
 
+    // Local caches - keeps allocations alive
+    let mut user_cache: HashMap<u64, Vec<String>> = HashMap::new();
+    let mut session_cache: HashMap<u64, Vec<u8>> = HashMap::new();
+    let mut query_results: Vec<Vec<String>> = Vec::new();
+
     let start = Instant::now();
-    let mut iteration = 0u64;
+    let mut tick = 0u64;
 
     loop {
-        iteration += 1;
+        tick += 1;
 
-        // Mix of different workloads
-        let result1 = cpu_intensive_math(1000);
-        let result2 = string_processing("hello world ".repeat(100));
-        let result3 = hash_operations(500);
-        let result4 = vector_operations(10000);
-        let result5 = recursive_fibonacci(25);
+        // User cache operations - slow growth
+        handle_user_cache(tick, &mut user_cache);
 
-        // Prevent optimizations from removing the work
-        if iteration % 100 == 0 {
+        // Session cache - high churn
+        handle_session_cache(tick, &mut session_cache);
+
+        // Query results - large allocations
+        handle_query_cache(tick, &mut query_results);
+
+        // CPU work
+        do_computation(tick);
+
+        // Status every 100 ticks
+        if tick.is_multiple_of(100) {
             println!(
-                "[{:>6.1}s] iter={} results={},{},{},{},{}",
+                "[{:>5.1}s] tick={:<5} users={:<4} sessions={:<4} queries={:<4}",
                 start.elapsed().as_secs_f64(),
-                iteration,
-                result1,
-                result2,
-                result3,
-                result4,
-                result5
+                tick,
+                user_cache.len(),
+                session_cache.len(),
+                query_results.len()
             );
         }
 
-        // Small sleep to make output readable
-        std::thread::sleep(Duration::from_millis(10));
+        // Throttle - ~30-40% CPU usage
+        std::thread::sleep(Duration::from_millis(3));
     }
 }
 
-/// CPU-intensive mathematical operations
+// =============================================================================
+// USER CACHE - Grows slowly, accumulates data
+// =============================================================================
+
 #[inline(never)]
-fn cpu_intensive_math(iterations: usize) -> f64 {
-    let mut result = 0.0f64;
-    for i in 1..=iterations {
-        result += (i as f64).sqrt();
-        result += (i as f64).sin();
-        result += (i as f64).cos();
-        result = result.abs();
+fn handle_user_cache(tick: u64, cache: &mut HashMap<u64, Vec<String>>) {
+    let user_id = tick % 200;
+
+    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(user_id) {
+        // New user - allocate profile data
+        let profile = create_user_profile(user_id);
+        e.insert(profile);
+    } else if tick.is_multiple_of(25) {
+        // Existing user - add activity
+        add_user_activity(user_id, tick, cache);
     }
-    result
 }
 
-/// String processing workload
 #[inline(never)]
-fn string_processing(input: String) -> usize {
-    let mut result = 0usize;
-
-    // Multiple string operations
-    let upper = input.to_uppercase();
-    result += upper.len();
-
-    let words: Vec<&str> = input.split_whitespace().collect();
-    result += words.len();
-
-    for word in words {
-        result += word.chars().filter(|c| c.is_alphabetic()).count();
-    }
-
-    let reversed: String = input.chars().rev().collect();
-    result += reversed.len();
-
-    result
+fn create_user_profile(user_id: u64) -> Vec<String> {
+    vec![
+        format!("user_{}", user_id),
+        format!("email_{}@example.com", user_id),
+        format!("pref_{}", user_id % 10),
+    ]
 }
 
-/// HashMap operations
 #[inline(never)]
-fn hash_operations(count: usize) -> usize {
-    let mut map: HashMap<String, usize> = HashMap::new();
-
-    // Insert
-    for i in 0..count {
-        map.insert(format!("key_{}", i), i * 2);
-    }
-
-    // Lookup
-    let mut sum = 0usize;
-    for i in 0..count {
-        if let Some(v) = map.get(&format!("key_{}", i)) {
-            sum += v;
+fn add_user_activity(user_id: u64, tick: u64, cache: &mut HashMap<u64, Vec<String>>) {
+    if let Some(profile) = cache.get_mut(&user_id) {
+        profile.push(format!("activity_{}", tick));
+        // Keep profile bounded
+        if profile.len() > 20 {
+            profile.remove(3); // Keep first 3 (id, email, pref)
         }
     }
-
-    // Remove half
-    for i in 0..count / 2 {
-        map.remove(&format!("key_{}", i));
-    }
-
-    sum + map.len()
 }
 
-/// Vector allocation and operations
+// =============================================================================
+// SESSION CACHE - High churn, frequent create/expire
+// =============================================================================
+
 #[inline(never)]
-fn vector_operations(size: usize) -> usize {
-    // Allocate
-    let mut vec: Vec<usize> = Vec::with_capacity(size);
+fn handle_session_cache(tick: u64, cache: &mut HashMap<u64, Vec<u8>>) {
+    let session_id = tick % 100;
 
-    // Fill
-    for i in 0..size {
-        vec.push(i * 3);
+    // Create or refresh session
+    if tick.is_multiple_of(3) {
+        let session_data = create_session_data(session_id);
+        cache.insert(session_id, session_data);
     }
 
-    // Sort (already sorted, but compiler doesn't know)
-    vec.sort_unstable();
-
-    // Binary search
-    let mut found = 0usize;
-    for i in (0..size).step_by(100) {
-        if vec.binary_search(&(i * 3)).is_ok() {
-            found += 1;
-        }
+    // Expire old sessions periodically
+    if tick.is_multiple_of(50) {
+        expire_sessions(tick, cache);
     }
-
-    // Sum
-    let sum: usize = vec.iter().sum();
-
-    sum / 1000 + found
 }
 
-/// Recursive Fibonacci (intentionally inefficient for CPU load)
 #[inline(never)]
-fn recursive_fibonacci(n: u32) -> u64 {
-    if n <= 1 {
-        n as u64
-    } else {
-        recursive_fibonacci(n - 1) + recursive_fibonacci(n - 2)
+fn create_session_data(session_id: u64) -> Vec<u8> {
+    // Simulate session with some data
+    vec![0u8; 256 + (session_id % 128) as usize]
+}
+
+#[inline(never)]
+fn expire_sessions(tick: u64, cache: &mut HashMap<u64, Vec<u8>>) {
+    // Remove ~20% of sessions
+    let threshold = tick % 100;
+    cache.retain(|id, _| *id > threshold.saturating_sub(20));
+}
+
+// =============================================================================
+// QUERY CACHE - Large results, bounded size
+// =============================================================================
+
+#[inline(never)]
+fn handle_query_cache(tick: u64, cache: &mut Vec<Vec<String>>) {
+    match tick % 5 {
+        0 => run_small_query(cache),
+        1 => run_medium_query(cache),
+        2 => run_large_query(cache),
+        _ => {} // No query
     }
+
+    // Bound cache size
+    if cache.len() > 100 {
+        evict_old_queries(cache);
+    }
+}
+
+#[inline(never)]
+fn run_small_query(cache: &mut Vec<Vec<String>>) {
+    let results: Vec<String> = (0..5).map(|i| format!("small_result_{}", i)).collect();
+    cache.push(results);
+}
+
+#[inline(never)]
+fn run_medium_query(cache: &mut Vec<Vec<String>>) {
+    let results: Vec<String> = (0..25).map(|i| format!("medium_result_{}", i)).collect();
+    cache.push(results);
+}
+
+#[inline(never)]
+fn run_large_query(cache: &mut Vec<Vec<String>>) {
+    // This should show up prominently in heap profile
+    let results: Vec<String> = (0..100)
+        .map(|i| format!("large_result_row_{}_with_extra_data", i))
+        .collect();
+    cache.push(results);
+}
+
+#[inline(never)]
+fn evict_old_queries(cache: &mut Vec<Vec<String>>) {
+    // Remove oldest 30 entries
+    cache.drain(0..30);
+}
+
+// =============================================================================
+// CPU WORK - Shows up in CPU profile
+// =============================================================================
+
+#[inline(never)]
+fn do_computation(tick: u64) {
+    // Do work every tick for better profiling visibility
+    compute_hash(tick);
+    compute_sort(tick);
+    if tick.is_multiple_of(3) {
+        compute_math(tick);
+    }
+}
+
+#[inline(never)]
+fn compute_hash(tick: u64) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for i in 0..2000 {
+        (tick + i).hash(&mut hasher);
+    }
+    let _ = hasher.finish();
+}
+
+#[inline(never)]
+fn compute_sort(tick: u64) {
+    let mut data: Vec<i32> = (0..500).map(|i| (tick as i32 * 7 + i) % 1000).collect();
+    data.sort();
+    let _ = data.iter().sum::<i32>();
+}
+
+#[inline(never)]
+fn compute_math(tick: u64) {
+    let mut sum = 0u64;
+    for i in 0u64..1000 {
+        sum = sum.wrapping_add(i.wrapping_mul(tick));
+        sum = sum.wrapping_mul(31).wrapping_add(17);
+    }
+    let _ = sum;
 }

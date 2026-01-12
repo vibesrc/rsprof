@@ -957,9 +957,17 @@ dependencies = [
  "object",
  "plain",
  "ratatui",
+ "rsprof-trace",
  "rusqlite",
  "rustc-demangle",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "rsprof-trace"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

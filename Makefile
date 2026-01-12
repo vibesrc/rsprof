@@ -34,10 +34,10 @@ clean:
 
 # Example target app
 target:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p rsprof --example target_app
 
 run-target: target
-	./target/debug/examples/target_app
+	./target/release/examples/target_app
 
 # Profile the running target app
 PROFILE_DURATION ?= 10s
@@ -54,12 +54,19 @@ profile: release
 	./target/release/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
 
 # View the last profile
-top:
+top-cpu:
 	@if [ ! -f $(PROFILE_OUTPUT) ]; then \
 		echo "No profile found. Run 'make profile' first."; \
 		exit 1; \
 	fi; \
-	./target/release/rsprof top cpu $(PROFILE_OUTPUT) --top 20
+	./target/release/rsprof top cpu $(PROFILE_OUTPUT) --top 100
+
+top-heap:
+	@if [ ! -f $(PROFILE_OUTPUT) ]; then \
+		echo "No profile found. Run 'make profile' first."; \
+		exit 1; \
+	fi; \
+	./target/release/rsprof top heap $(PROFILE_OUTPUT) --top 100
 
 top-json:
 	@if [ ! -f $(PROFILE_OUTPUT) ]; then \

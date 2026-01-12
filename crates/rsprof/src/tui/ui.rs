@@ -1,7 +1,7 @@
 use super::app::{App, ChartType, Focus, ViewMode};
 use crate::storage::{CpuEntry, HeapEntry};
-use std::collections::{HashMap, VecDeque};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
@@ -10,8 +10,8 @@ use ratatui::{
         Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table,
     },
-    Frame,
 };
+use std::collections::{HashMap, VecDeque};
 
 /// Unified table row data - used by all table views
 struct TableRow {
@@ -32,7 +32,10 @@ struct TableRow {
 }
 
 /// Convert CPU entries to unified table rows
-fn cpu_to_table_rows(entries: &[CpuEntry], sparklines: &HashMap<i64, VecDeque<i64>>) -> Vec<TableRow> {
+fn cpu_to_table_rows(
+    entries: &[CpuEntry],
+    sparklines: &HashMap<i64, VecDeque<i64>>,
+) -> Vec<TableRow> {
     entries
         .iter()
         .map(|e| {
@@ -62,7 +65,10 @@ fn cpu_to_table_rows(entries: &[CpuEntry], sparklines: &HashMap<i64, VecDeque<i6
 }
 
 /// Convert Heap entries to unified table rows
-fn heap_to_table_rows(entries: &[HeapEntry], sparklines: &HashMap<i64, VecDeque<i64>>) -> Vec<TableRow> {
+fn heap_to_table_rows(
+    entries: &[HeapEntry],
+    sparklines: &HashMap<i64, VecDeque<i64>>,
+) -> Vec<TableRow> {
     entries
         .iter()
         .map(|e| {
@@ -108,7 +114,10 @@ fn render_unified_table(
     if rows.is_empty() {
         let text = vec![
             Line::from(""),
-            Line::from(Span::styled("No data...", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "No data...",
+                Style::default().fg(Color::DarkGray),
+            )),
         ];
         let paragraph = Paragraph::new(text).block(block);
         frame.render_widget(paragraph, area);
@@ -117,7 +126,13 @@ fn render_unified_table(
 
     let header_cells = ["Total", "Live", "Function", "Location", "Trend"]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        .map(|h| {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
     let header = Row::new(header_cells).height(1);
 
     let visible_height = area.height.saturating_sub(3) as usize;
@@ -161,16 +176,14 @@ fn render_unified_table(
         .collect();
 
     let widths = [
-        Constraint::Length(8),   // Total (fixed)
-        Constraint::Length(8),   // Live (fixed)
-        Constraint::Fill(1),     // Function (expand)
-        Constraint::Fill(1),     // Location (expand)
-        Constraint::Length(14),  // Trend (fixed, 12 chars + padding)
+        Constraint::Length(8),  // Total (fixed)
+        Constraint::Length(8),  // Live (fixed)
+        Constraint::Fill(1),    // Function (expand)
+        Constraint::Fill(1),    // Location (expand)
+        Constraint::Length(14), // Trend (fixed, 12 chars + padding)
     ];
 
-    let table = Table::new(table_rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(table_rows, widths).header(header).block(block);
 
     frame.render_widget(table, area);
 
@@ -182,8 +195,7 @@ fn render_unified_table(
             .track_symbol(Some("│"))
             .thumb_symbol("█");
 
-        let mut scrollbar_state = ScrollbarState::new(rows.len())
-            .position(scroll_offset);
+        let mut scrollbar_state = ScrollbarState::new(rows.len()).position(scroll_offset);
 
         let scrollbar_area = Rect {
             x: area.x + area.width - 1,
@@ -200,10 +212,7 @@ fn render_unified_table(
 /// New data appears on the RIGHT, old data shifts LEFT
 fn render_sparkline(values: &[i64], width: usize, global_max: i64) -> Text<'static> {
     if values.is_empty() {
-        return Text::styled(
-            "·".repeat(width),
-            Style::default().fg(Color::DarkGray),
-        );
+        return Text::styled("·".repeat(width), Style::default().fg(Color::DarkGray));
     }
 
     let min_val = *values.iter().min().unwrap_or(&0);
@@ -320,29 +329,52 @@ fn render_header_status(frame: &mut Frame, app: &App, area: Rect) {
         // Static/view mode header
         let file_name = app.file_name().unwrap_or("profile");
         Line::from(vec![
-            Span::styled("rsprof", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "rsprof",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled(" VIEW ", Style::default().bg(Color::Blue).fg(Color::White)),
             Span::raw(format!(
                 " {} │ {:02}:{:02}:{:02} │ {} samples",
-                file_name, hours, minutes, seconds, app.total_samples()
+                file_name,
+                hours,
+                minutes,
+                seconds,
+                app.total_samples()
             )),
         ])
     } else {
         // Live recording mode header
         let status = if app.is_paused() {
-            Span::styled(" PAUSED ", Style::default().bg(Color::Yellow).fg(Color::Black))
+            Span::styled(
+                " PAUSED ",
+                Style::default().bg(Color::Yellow).fg(Color::Black),
+            )
         } else {
-            Span::styled(" RECORDING ", Style::default().bg(Color::Green).fg(Color::Black))
+            Span::styled(
+                " RECORDING ",
+                Style::default().bg(Color::Green).fg(Color::Black),
+            )
         };
 
         Line::from(vec![
-            Span::styled("rsprof", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "rsprof",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             status,
             Span::raw(format!(
                 " {:02}:{:02}:{:02} │ {} samples",
-                hours, minutes, seconds, app.total_samples()
+                hours,
+                minutes,
+                seconds,
+                app.total_samples()
             )),
         ])
     };
@@ -355,8 +387,16 @@ fn render_header_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let active_style = Style::default().bg(Color::Cyan).fg(Color::Black);
     let inactive_style = Style::default().fg(Color::DarkGray);
 
-    let cpu_style = if app.view_mode == ViewMode::Cpu { active_style } else { inactive_style };
-    let mem_style = if app.view_mode == ViewMode::Memory { active_style } else { inactive_style };
+    let cpu_style = if app.view_mode == ViewMode::Cpu {
+        active_style
+    } else {
+        inactive_style
+    };
+    let mem_style = if app.view_mode == ViewMode::Memory {
+        active_style
+    } else {
+        inactive_style
+    };
 
     let tabs = Line::from(vec![
         Span::styled("[CPU]", cpu_style),
@@ -394,10 +434,7 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         // Split: left table (60%) | right chart (40%)
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(60),
-                Constraint::Percentage(40),
-            ])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
         // Store areas for mouse click detection
@@ -405,7 +442,15 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.set_chart_area(chunks[1]);
 
         // Render unified table
-        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, chunks[0]);
+        render_unified_table(
+            frame,
+            title,
+            &rows,
+            selected,
+            scroll_offset,
+            focus,
+            chunks[0],
+        );
 
         // Render appropriate chart
         match view_mode {
@@ -453,7 +498,9 @@ fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area
     let chart_inner_width = area.width.saturating_sub(12).max(1) as usize;
 
     // Query heap data aggregated at DB level
-    let chart_data: Vec<(f64, f64)> = app.query_heap_chart_data(x_start, x_end, chart_inner_width).to_vec();
+    let chart_data: Vec<(f64, f64)> = app
+        .query_heap_chart_data(x_start, x_end, chart_inner_width)
+        .to_vec();
 
     let block = Block::default()
         .title(title.clone())
@@ -479,14 +526,14 @@ fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area
     let (y_min, y_max) = if visible_data.is_empty() {
         (0.0, 1000000.0) // Default to 1MB
     } else {
-        let min_y = visible_data.iter().map(|(_, y)| *y).fold(f64::MAX, f64::min);
+        let min_y = visible_data
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::MAX, f64::min);
         let max_y = visible_data.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
         let range = (max_y - min_y).max(1.0);
         let padding = range * 0.1;
-        (
-            (min_y - padding).max(0.0),
-            max_y + padding,
-        )
+        ((min_y - padding).max(0.0), max_y + padding)
     };
 
     let (marker, graph_type) = match chart_type {
@@ -579,7 +626,9 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
 
     // Query data aggregated at DB level (with caching and prefetch)
     // Clone to release the borrow
-    let chart_data: Vec<(f64, f64)> = app.query_chart_data(x_start, x_end, chart_inner_width).to_vec();
+    let chart_data: Vec<(f64, f64)> = app
+        .query_chart_data(x_start, x_end, chart_inner_width)
+        .to_vec();
 
     let block = Block::default()
         .title(title.clone())
@@ -605,7 +654,10 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
     let (y_min, y_max) = if visible_data.is_empty() {
         (0.0, 100.0)
     } else {
-        let min_y = visible_data.iter().map(|(_, y)| *y).fold(f64::MAX, f64::min);
+        let min_y = visible_data
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::MAX, f64::min);
         let max_y = visible_data.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
         let range = (max_y - min_y).max(1.0);
         let padding = range * 0.1;
@@ -720,11 +772,14 @@ fn format_bytes(bytes: i64) -> String {
 
 /// Color for memory amount based on size
 fn color_for_bytes(bytes: i64) -> Color {
-    if bytes >= 100_000_000 { // 100MB+
+    if bytes >= 100_000_000 {
+        // 100MB+
         Color::Red
-    } else if bytes >= 10_000_000 { // 10MB+
+    } else if bytes >= 10_000_000 {
+        // 10MB+
         Color::Yellow
-    } else if bytes >= 1_000_000 { // 1MB+
+    } else if bytes >= 1_000_000 {
+        // 1MB+
         Color::Green
     } else {
         Color::White
@@ -748,7 +803,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw(" mode "));
 
     // Chart toggle - show/hide
-    let chart_label = if app.chart_visible { "hide chart" } else { "show chart" };
+    let chart_label = if app.chart_visible {
+        "hide chart"
+    } else {
+        "show chart"
+    };
     spans.push(Span::styled(" c ", Style::default().bg(Color::DarkGray)));
     spans.push(Span::raw(format!(" {} ", chart_label)));
 
@@ -803,19 +862,19 @@ fn simplify_path(path: &str) -> String {
     if path.starts_with('[') {
         return path.to_string();
     }
-    if path.contains("/rust/library/") || path.contains("/rustc/") {
-        if let Some(filename) = path.rsplit('/').next() {
-            return format!("<std>/{}", filename);
-        }
+    if (path.contains("/rust/library/") || path.contains("/rustc/"))
+        && let Some(filename) = path.rsplit('/').next()
+    {
+        return format!("<std>/{}", filename);
     }
-    if path.contains("/.cargo/") {
-        if let Some(idx) = path.find("/src/") {
-            let before_src = &path[..idx];
-            if let Some(crate_start) = before_src.rfind('/') {
-                let crate_name = &before_src[crate_start + 1..];
-                let after_src = &path[idx + 5..];
-                return format!("<{}>/{}", crate_name, after_src);
-            }
+    if path.contains("/.cargo/")
+        && let Some(idx) = path.find("/src/")
+    {
+        let before_src = &path[..idx];
+        if let Some(crate_start) = before_src.rfind('/') {
+            let crate_name = &before_src[crate_start + 1..];
+            let after_src = &path[idx + 5..];
+            return format!("<{}>/{}", crate_name, after_src);
         }
     }
     if let Some(idx) = path.find("/src/") {

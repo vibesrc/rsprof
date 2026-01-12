@@ -1,10 +1,11 @@
 use crate::cli::TopMetric;
 use crate::error::Result;
-use crate::storage::{query_top_cpu, query_top_heap_live, HeapEntry};
+use crate::storage::{HeapEntry, query_top_cpu, query_top_heap_live};
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
     metric: TopMetric,
@@ -20,11 +21,9 @@ pub fn run(
 
     // Get metadata
     let duration_ms: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(timestamp_ms) FROM checkpoints",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT MAX(timestamp_ms) FROM checkpoints", [], |row| {
+            row.get(0)
+        })
         .ok();
 
     let total_samples: i64 = conn
@@ -82,18 +81,24 @@ fn print_cpu_table(
         let secs = ms / 1000;
         let mins = secs / 60;
         let remaining_secs = secs % 60;
-        println!("# Duration: {}m{:02}s | Samples: {}", mins, remaining_secs, total_samples);
+        println!(
+            "# Duration: {}m{:02}s | Samples: {}",
+            mins, remaining_secs, total_samples
+        );
     }
     println!();
 
     // Simple aligned output - LLM-friendly
-    println!("{:>6}  {:<30}  {}", "CPU%", "LOCATION", "FUNCTION");
+    println!("{:>6}  {:<30}  FUNCTION", "CPU%", "LOCATION");
     println!("{}", "-".repeat(80));
 
     for entry in entries {
         let location = format_location(&entry.file, entry.line);
         let function = format_function(&entry.function);
-        println!("{:>5.1}%  {:<30}  {}", entry.total_percent, location, function);
+        println!(
+            "{:>5.1}%  {:<30}  {}",
+            entry.total_percent, location, function
+        );
     }
 }
 
@@ -155,10 +160,10 @@ fn simplify_path(path: &str) -> String {
     }
 
     // Extract just filename for stdlib paths
-    if path.contains("/rust/library/") || path.contains("/rustc/") {
-        if let Some(filename) = path.rsplit('/').next() {
-            return format!("<std>/{}", filename);
-        }
+    if (path.contains("/rust/library/") || path.contains("/rustc/"))
+        && let Some(filename) = path.rsplit('/').next()
+    {
+        return format!("<std>/{}", filename);
     }
 
     // For cargo dependencies, extract crate name and file
@@ -185,44 +190,49 @@ fn simplify_path(path: &str) -> String {
     }
 
     // Fallback: just the filename
-    path.rsplit('/')
-        .next()
-        .unwrap_or(path)
-        .to_string()
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-fn print_heap_table(
-    file: &Path,
-    duration_ms: Option<i64>,
-    entries: &[HeapEntry],
-) {
+fn print_heap_table(file: &Path, duration_ms: Option<i64>, entries: &[HeapEntry]) {
+    // Header comment
     println!("# {}", file.display());
     if let Some(ms) = duration_ms {
         let secs = ms / 1000;
         let mins = secs / 60;
         let remaining_secs = secs % 60;
-        println!("# Duration: {}m{:02}s", mins, remaining_secs);
+        // Calculate total allocations
+        let total_allocs: u64 = entries.iter().map(|e| e.alloc_count).sum();
+        let total_bytes: i64 = entries.iter().map(|e| e.total_alloc_bytes).sum();
+        println!(
+            "# Duration: {}m{:02}s | Allocs: {} | Total: {}",
+            mins,
+            remaining_secs,
+            format_count(total_allocs),
+            format_bytes(total_bytes)
+        );
     }
     println!();
 
-    println!("{:>10}  {:>10}  {:>10}  {:<30}  {}", "ALLOC", "FREE", "LIVE", "LOCATION", "FUNCTION");
-    println!("{}", "-".repeat(90));
+    // Heaptrack-style output: SIZE  CALLS  LOCATION  FUNCTION
+    println!(
+        "{:>10}  {:>12}  {:<30}  FUNCTION",
+        "SIZE", "CALLS", "LOCATION"
+    );
+    println!("{}", "-".repeat(80));
 
     for entry in entries {
         let location = format_location(&entry.file, entry.line);
         let function = format_function(&entry.function);
-        let alloc = format_bytes(entry.total_alloc_bytes);
-        let free = format_bytes(entry.total_free_bytes);
-        let live = format_bytes(entry.live_bytes);
-        println!("{:>10}  {:>10}  {:>10}  {:<30}  {}", alloc, free, live, location, function);
+        let size = format_bytes(entry.total_alloc_bytes);
+        let calls = format!("{} calls", format_count(entry.alloc_count));
+        println!(
+            "{:>10}  {:>12}  {:<30}  {}",
+            size, calls, location, function
+        );
     }
 }
 
-fn print_heap_json(
-    file: &Path,
-    duration_ms: Option<i64>,
-    entries: &[HeapEntry],
-) {
+fn print_heap_json(file: &Path, duration_ms: Option<i64>, entries: &[HeapEntry]) {
     println!("{{");
     println!("  \"file\": \"{}\",", file.display());
     if let Some(ms) = duration_ms {
@@ -233,9 +243,11 @@ fn print_heap_json(
     for (i, entry) in entries.iter().enumerate() {
         let comma = if i < entries.len() - 1 { "," } else { "" };
         println!(
-            "    {{ \"alloc_bytes\": {}, \"free_bytes\": {}, \"live_bytes\": {}, \"file\": \"{}\", \"line\": {}, \"function\": \"{}\" }}{}",
+            "    {{ \"alloc_bytes\": {}, \"alloc_count\": {}, \"free_bytes\": {}, \"free_count\": {}, \"live_bytes\": {}, \"file\": \"{}\", \"line\": {}, \"function\": \"{}\" }}{}",
             entry.total_alloc_bytes,
+            entry.alloc_count,
             entry.total_free_bytes,
+            entry.free_count,
             entry.live_bytes,
             entry.file.replace('\\', "\\\\").replace('"', "\\\""),
             entry.line,
@@ -249,28 +261,48 @@ fn print_heap_json(
 }
 
 fn print_heap_csv(entries: &[HeapEntry]) {
-    println!("alloc_bytes,free_bytes,live_bytes,file,line,function");
+    println!("alloc_bytes,alloc_count,free_bytes,free_count,live_bytes,file,line,function");
     for entry in entries {
         println!(
-            "{},{},{},{},{},\"{}\"",
-            entry.total_alloc_bytes, entry.total_free_bytes, entry.live_bytes, entry.file, entry.line, entry.function
+            "{},{},{},{},{},{},{},\"{}\"",
+            entry.total_alloc_bytes,
+            entry.alloc_count,
+            entry.total_free_bytes,
+            entry.free_count,
+            entry.live_bytes,
+            entry.file,
+            entry.line,
+            entry.function
         );
     }
 }
 
-/// Format bytes as human-readable
+/// Format bytes as human-readable with decimals (heaptrack style)
 fn format_bytes(bytes: i64) -> String {
-    let abs = bytes.unsigned_abs();
+    let abs = bytes.unsigned_abs() as f64;
     let sign = if bytes < 0 { "-" } else { "" };
-    if abs >= 1024 * 1024 * 1024 {
-        format!("{}{}GB", sign, abs / (1024 * 1024 * 1024))
-    } else if abs >= 1024 * 1024 {
-        format!("{}{}MB", sign, abs / (1024 * 1024))
-    } else if abs >= 1024 {
-        format!("{}{}KB", sign, abs / 1024)
+    if abs >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{}{:.2}G", sign, abs / (1024.0 * 1024.0 * 1024.0))
+    } else if abs >= 1024.0 * 1024.0 {
+        format!("{}{:.2}M", sign, abs / (1024.0 * 1024.0))
+    } else if abs >= 1024.0 {
+        format!("{}{:.1}K", sign, abs / 1024.0)
     } else {
-        format!("{}{}B", sign, abs)
+        format!("{}{}B", sign, bytes.unsigned_abs())
     }
+}
+
+/// Format a number with commas for readability
+fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 /// Format a function name - remove hash suffix and simplify
@@ -325,5 +357,3 @@ fn format_function(func: &str) -> String {
 
     result
 }
-
-

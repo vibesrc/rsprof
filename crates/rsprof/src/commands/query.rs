@@ -7,11 +7,7 @@ pub fn run(file: &Path, sql: &str) -> Result<()> {
     let mut stmt = conn.prepare(sql)?;
 
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
     // Print header
     println!("{}", column_names.join("\t"));

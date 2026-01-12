@@ -35,7 +35,8 @@ impl HeapSampler {
     pub fn new(_pid: u32, _exe_path: &Path) -> Result<Self> {
         Err(Error::Bpf(
             "Heap profiling not available. Rebuild with: cargo build --features heap\n\
-             Requires: clang and libbpf-dev (sudo apt install clang libbpf-dev)".to_string()
+             Requires: clang and libbpf-dev (sudo apt install clang libbpf-dev)"
+                .to_string(),
         ))
     }
 

@@ -127,6 +127,11 @@ struct {
 // Entry: capture size and inline stack for __rust_alloc(size, align)
 SEC("uprobe/rust_alloc_entry")
 int uprobe_rust_alloc(struct pt_regs *ctx) {
+    // Increment debug counter FIRST (before any filtering)
+    u32 counter_key = 0;
+    u64 *counter = bpf_map_lookup_elem(&debug_counters, &counter_key);
+    if (counter) __sync_fetch_and_add(counter, 1);
+
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     u32 target_pid = get_target_pid();
     if (target_pid && pid != target_pid)

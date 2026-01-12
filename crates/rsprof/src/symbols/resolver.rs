@@ -43,6 +43,8 @@ pub struct SymbolResolver {
     ranges: Vec<AddressRange>,
     /// Function names by address
     functions: HashMap<u64, String>,
+    /// Function declarations: function name -> (file, line)
+    function_decls: HashMap<String, (String, u32)>,
     /// ASLR offset to subtract from runtime addresses
     aslr_offset: u64,
     /// LRU cache for recent lookups
@@ -63,6 +65,7 @@ impl SymbolResolver {
         Ok(SymbolResolver {
             ranges: dwarf.ranges,
             functions: dwarf.functions,
+            function_decls: dwarf.function_decls,
             aslr_offset,
             cache: HashMap::new(),
         })
@@ -71,6 +74,11 @@ impl SymbolResolver {
     /// Number of address ranges loaded
     pub fn range_count(&self) -> usize {
         self.ranges.len()
+    }
+
+    /// Get the ASLR offset being used
+    pub fn aslr_offset(&self) -> u64 {
+        self.aslr_offset
     }
 
     /// Resolve a runtime address to a source location
@@ -83,8 +91,12 @@ impl SymbolResolver {
         // Adjust for ASLR
         let debug_addr = addr.saturating_sub(self.aslr_offset);
 
+        // Get function name first
+        let function = self.find_function(debug_addr);
+
         // Binary search for the address range
-        let location = match self.ranges.binary_search_by(|r| {
+
+        match self.ranges.binary_search_by(|r| {
             if debug_addr < r.start {
                 std::cmp::Ordering::Greater
             } else if debug_addr >= r.end {
@@ -95,18 +107,48 @@ impl SymbolResolver {
         }) {
             Ok(idx) => {
                 let range = &self.ranges[idx];
-                let function = self.find_function(debug_addr);
+                let file = simplify_path(&range.file);
+                let line = range.line;
+
+                // Check if line info points to stdlib but function is user code
+                // If so, try to use the function's declaration location instead
+                if is_stdlib_path(&file)
+                    && !is_stdlib_function(&function)
+                    && let Some((decl_file, decl_line)) = self.function_decls.get(&function)
+                {
+                    let simplified_decl = simplify_path(decl_file);
+                    // Only use decl location if it's a user file
+                    if !is_stdlib_path(&simplified_decl) {
+                        return Location {
+                            file: simplified_decl,
+                            line: *decl_line,
+                            column: 0,
+                            function,
+                        };
+                    }
+                }
+
                 Location {
-                    file: simplify_path(&range.file),
-                    line: range.line,
+                    file,
+                    line,
                     column: range.column,
                     function,
                 }
             }
             Err(_) => {
-                // No line info, try to at least get function name
-                let function = self.find_function(debug_addr);
+                // No line info, try to use function declaration if available
                 if function != "[unknown]" {
+                    if let Some((decl_file, decl_line)) = self.function_decls.get(&function) {
+                        let simplified = simplify_path(decl_file);
+                        if !is_stdlib_path(&simplified) {
+                            return Location {
+                                file: simplified,
+                                line: *decl_line,
+                                column: 0,
+                                function,
+                            };
+                        }
+                    }
                     Location {
                         file: "[no line info]".to_string(),
                         line: 0,
@@ -117,9 +159,7 @@ impl SymbolResolver {
                     Location::unknown()
                 }
             }
-        };
-
-        location
+        }
     }
 
     /// Resolve and cache (mutable version)
@@ -156,14 +196,38 @@ impl SymbolResolver {
     }
 }
 
+/// Check if a path looks like stdlib/library code
+fn is_stdlib_path(path: &str) -> bool {
+    path.contains("/rustc/")
+        || path.contains("/.cargo/")
+        || path.contains("/rust/library/")
+        || path.starts_with("<std>")
+        || path.starts_with("<hashbrown>")
+        || path.starts_with("<")
+        || path.contains("library/core/")
+        || path.contains("library/std/")
+        || path.contains("library/alloc/")
+}
+
+/// Check if a function name looks like stdlib/internal code
+fn is_stdlib_function(name: &str) -> bool {
+    name.starts_with("std::")
+        || name.starts_with("core::")
+        || name.starts_with("alloc::")
+        || name.starts_with("hashbrown::")
+        || name.starts_with("__rust")
+        || name.starts_with("_Unwind")
+        || name.starts_with("rust_eh_personality")
+        || name.starts_with("addr2line::")
+        || name.starts_with("gimli::")
+        || name.starts_with("object::")
+        || name == "[unknown]"
+}
+
 /// Simplify a file path for display
 fn simplify_path(path: &str) -> String {
     // Remove common prefixes
-    let prefixes_to_strip = [
-        "/rustc/",
-        "/.cargo/registry/src/",
-        "/.cargo/git/checkouts/",
-    ];
+    let prefixes_to_strip = ["/rustc/", "/.cargo/registry/src/", "/.cargo/git/checkouts/"];
 
     let mut result = path.to_string();
 

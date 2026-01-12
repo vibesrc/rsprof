@@ -21,12 +21,11 @@ pub fn find_profiles(dir: &Path) -> Result<Vec<ProfileInfo>> {
         let path = entry.path();
         if path.extension().map(|e| e == "db").unwrap_or(false) {
             // Check if filename matches rsprof.*.db pattern
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("rsprof.") {
-                    if let Ok(info) = get_profile_info(&path) {
-                        profiles.push(info);
-                    }
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("rsprof.")
+                && let Ok(info) = get_profile_info(&path)
+            {
+                profiles.push(info);
             }
         }
     }
@@ -121,7 +120,11 @@ pub fn run(dir: Option<&Path>) -> Result<()> {
             .unwrap_or_default();
 
         let duration = if profile.duration_secs >= 60.0 {
-            format!("{:.0}m{:.0}s", profile.duration_secs / 60.0, profile.duration_secs % 60.0)
+            format!(
+                "{:.0}m{:.0}s",
+                profile.duration_secs / 60.0,
+                profile.duration_secs % 60.0
+            )
         } else {
             format!("{:.1}s", profile.duration_secs)
         };

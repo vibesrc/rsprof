@@ -53,4 +53,4 @@ rsprof-trace = { path = "../rsprof-trace", features = ["profiling"] }
 
 [[example]]
 name = "target_app"
-path = "examples/target_app.rs"
+path = "examples/target_app/main.rs"

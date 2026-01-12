@@ -150,6 +150,59 @@ rsprof-trace = { version = "0.1" }
 
 When no features are enabled, all profiling calls become no-ops and the allocator is a direct passthrough to the system allocator.
 
+## Memory Profiling
+
+Memory profiling tracks every allocation and deallocation in your application, letting you identify:
+
+- **Memory leaks** - Allocations that are never freed
+- **High-churn allocations** - Functions that allocate/free frequently
+- **Large allocations** - Where your memory is going
+- **Live memory by call site** - What's holding memory right now
+
+### What's Tracked
+
+| Metric | Description |
+|--------|-------------|
+| Live bytes | Currently allocated memory (allocs - frees) |
+| Total allocated | Cumulative bytes allocated |
+| Total freed | Cumulative bytes freed |
+| Alloc count | Number of allocation calls |
+| Free count | Number of deallocation calls |
+
+### Memory View
+
+Press `2` or `m` in the TUI to switch to memory view. The table shows:
+
+```
+Live     Trend      Function                    Location
+1.2MB    ▂▃▅▇█▇▅   run_large_query             src/main.rs:42
+256KB    ▁▁▂▂▃▃▄   create_session_data         src/cache.rs:87
+...
+```
+
+- **Live** - Current live bytes at this call site
+- **Trend** - Sparkline showing memory over time
+- **Function** - The allocation site (first user frame, not allocator internals)
+
+### Finding Memory Leaks
+
+Look for call sites where:
+- Live bytes keep growing over time (upward sparkline trend)
+- Alloc count >> Free count
+
+```bash
+# Query for potential leaks
+rsprof query profile.db "
+  SELECT function, file, line,
+         total_alloc_bytes - total_free_bytes as leaked,
+         total_allocs - total_frees as leaked_count
+  FROM heap_samples
+  WHERE total_allocs > total_frees
+  ORDER BY leaked DESC
+  LIMIT 20
+"
+```
+
 ## How It Works
 
 1. **rsprof-trace** writes profiling events to a shared memory ring buffer

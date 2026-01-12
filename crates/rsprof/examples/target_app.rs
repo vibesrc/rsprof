@@ -43,8 +43,8 @@ fn main() {
         // CPU work
         do_computation(tick);
 
-        // Status every 100 ticks
-        if tick.is_multiple_of(100) {
+        // Status every 1000 ticks (reduce I/O noise in profiling)
+        if tick.is_multiple_of(1000) {
             println!(
                 "[{:>5.1}s] tick={:<5} users={:<4} sessions={:<4} queries={:<4}",
                 start.elapsed().as_secs_f64(),

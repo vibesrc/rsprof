@@ -211,6 +211,7 @@ fn is_stdlib_path(path: &str) -> bool {
 
 /// Check if a function name looks like stdlib/internal code
 fn is_stdlib_function(name: &str) -> bool {
+    // Check starts_with patterns
     name.starts_with("std::")
         || name.starts_with("core::")
         || name.starts_with("alloc::")
@@ -222,6 +223,14 @@ fn is_stdlib_function(name: &str) -> bool {
         || name.starts_with("gimli::")
         || name.starts_with("object::")
         || name == "[unknown]"
+        // Trait impls: <Type as std::*>::method or <std::*>::method
+        || name.starts_with("<std::")
+        || name.starts_with("<core::")
+        || name.starts_with("<alloc::")
+        // Trait impls with generic params: <T as core::fmt::Display>::fmt
+        || name.contains(" as core::")
+        || name.contains(" as std::")
+        || name.contains(" as alloc::")
 }
 
 /// Simplify a file path for display

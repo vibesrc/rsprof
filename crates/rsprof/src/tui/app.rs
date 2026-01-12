@@ -45,35 +45,81 @@ use super::ui;
 
 /// Patterns for internal/profiler functions to skip
 const SKIP_FUNCTION_PATTERNS: &[&str] = &[
+    // Rust allocator entry points
     "__rust_alloc",
     "__rust_dealloc",
     "__rust_realloc",
     "__rustc",
+    // Rust alloc crate internals
     "alloc::alloc::",
     "alloc::raw_vec::",
     "alloc::vec::",
     "alloc::string::",
     "alloc::collections::",
     "<alloc::",
+    "alloc::fmt::",
+    "alloc::ffi::", // format! and CString internals
+    // Hashmap/collections internals
     "hashbrown::",
     "std::collections::hash",
+    // Core library internals
     "core::ptr::",
     "core::slice::",
     "core::iter::",
     "<core::",
     "core::ops::function::",
+    "core::ops::drop::",
+    "core::ffi::",
+    "core::fmt::",
+    "core::num::",
+    "core::str::",
+    "core::hash::",
+    "core::mem::",
+    // Std library internals
+    "std::io::",
+    "std::fmt::",
+    "std::sys::",
+    "std::thread::",
+    "std::sync::",
+    "<std::",
+    "fmt::num::",
+    "fmt::Write::",
+    // Trait implementations (raw DWARF names)
+    " as core::fmt::",   // <T as core::fmt::Display>::fmt
+    " as std::fmt::",    // <T as std::fmt::Write>::write
+    " as core::hash::",  // <T as core::hash::Hash>::hash
+    " as alloc::",       // <T as alloc::*>::method
+    // Trait implementations on generic types
+    "<_>::", // any method on trait objects
+    // Libc functions
+    "malloc",
+    "calloc",
+    "realloc",
+    "free",
+    "memcpy",
+    "memmove",
+    "memset",
+    "memchr",
+    "_start",
+    "__libc_start_main",
+    // Exception/unwinding
     "_Unwind_",
     "__cxa_",
     "_fini",
     "_init",
+    "rust_eh_personality",
+    // Profiler internals (rsprof-trace)
     "addr2line::",
     "gimli::",
     "object::",
     "miniz_oxide::",
-    "sort::shared::smallsort::",
     "rsprof_alloc::",
-    "profiling::",         // rsprof-alloc profiler internals
-    "rust_eh_personality", // exception handling
+    "profiling::",
+    "rsprof::",
+    // Sorting internals
+    "sort::shared::smallsort::",
+    // Generic patterns for generated code
+    "::{{closure}}", // closures attributed to parent
 ];
 
 /// Check if a file path looks like internal/library code

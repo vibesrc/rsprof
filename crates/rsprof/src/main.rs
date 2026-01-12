@@ -222,6 +222,11 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "<std::",
     "fmt::num::",
     "fmt::Write::",
+    // Trait implementations (raw DWARF names)
+    " as core::fmt::",   // <T as core::fmt::Display>::fmt
+    " as std::fmt::",    // <T as std::fmt::Write>::write
+    " as core::hash::",  // <T as core::hash::Hash>::hash
+    " as alloc::",       // <T as alloc::*>::method
     // Trait implementations on generic types
     "<_>::", // any method on trait objects
     // Libc functions

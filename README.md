@@ -1,0 +1,168 @@
+# rsprof
+
+A zero-instrumentation profiler for Rust applications with real-time CPU and heap analysis.
+
+## Features
+
+- **CPU profiling** - Timer-based sampling via perf events or self-instrumentation
+- **Heap profiling** - Track allocations, deallocations, and live memory
+- **Interactive TUI** - Real-time charts and tables with vim-style navigation
+- **SQLite storage** - Query profiles with SQL, export to JSON/CSV
+- **Symbol resolution** - Full DWARF debug info support
+
+## Quick Start
+
+### 1. Add rsprof-trace to your application
+
+```toml
+[dependencies]
+rsprof-trace = { version = "0.1", features = ["profiling"] }
+```
+
+### 2. Instrument your code
+
+```rust
+// Enable heap profiling with the custom allocator
+#[global_allocator]
+static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
+
+fn main() {
+    // Start CPU profiling at 99Hz
+    rsprof_trace::start_cpu_profiling(99);
+
+    // Your application code...
+}
+```
+
+### 3. Build with frame pointers
+
+Frame pointers are required for accurate stack traces:
+
+```bash
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+```
+
+### 4. Run the profiler
+
+```bash
+# Start your application
+./target/release/your_app &
+
+# Attach the profiler
+rsprof -p $(pgrep your_app)
+```
+
+## Installation
+
+```bash
+cargo install rsprof
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/vibesrc/rsprof
+cd rsprof
+cargo install --path crates/rsprof
+```
+
+## Usage
+
+### Live Profiling
+
+```bash
+# Profile by PID
+rsprof -p 1234
+
+# Profile by process name
+rsprof -P my_app
+
+# Save to specific file
+rsprof -p 1234 -o profile.db
+
+# Record for 30 seconds
+rsprof -p 1234 -d 30s
+
+# Quiet mode (no TUI, just record)
+rsprof -p 1234 -q -d 10s
+```
+
+### Viewing Saved Profiles
+
+```bash
+# Interactive TUI viewer
+rsprof view profile.db
+
+# View most recent profile
+rsprof view
+
+# List available profiles
+rsprof list
+```
+
+### CLI Analysis
+
+```bash
+# Top CPU consumers
+rsprof top cpu profile.db
+
+# Top memory consumers
+rsprof top heap profile.db
+
+# With options
+rsprof top cpu profile.db -n 50 --threshold 1.0 --json
+
+# Raw SQL queries
+rsprof query profile.db "SELECT * FROM cpu_samples LIMIT 10"
+```
+
+## TUI Controls
+
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | Quit |
+| `1` / `2` | Switch to CPU / Memory view |
+| `m` | Toggle view mode |
+| `c` / `Enter` | Toggle chart visibility |
+| `j` / `k` | Navigate table (down/up) |
+| `h` / `l` | Pan chart (left/right) |
+| `+` / `-` | Zoom chart (in/out) |
+| `Tab` | Switch focus (table/chart) |
+| `p` | Pause/resume (live mode) |
+
+## rsprof-trace Features
+
+The `rsprof-trace` crate supports selective profiling:
+
+```toml
+# CPU + Heap (default with "profiling")
+rsprof-trace = { version = "0.1", features = ["profiling"] }
+
+# CPU only
+rsprof-trace = { version = "0.1", features = ["cpu"] }
+
+# Heap only
+rsprof-trace = { version = "0.1", features = ["heap"] }
+
+# Disabled (zero-cost, for conditional compilation)
+rsprof-trace = { version = "0.1" }
+```
+
+When no features are enabled, all profiling calls become no-ops and the allocator is a direct passthrough to the system allocator.
+
+## How It Works
+
+1. **rsprof-trace** writes profiling events to a shared memory ring buffer
+2. **rsprof** attaches to the process and reads events from shared memory
+3. Stack traces are captured using frame pointers for minimal overhead
+4. Data is stored in SQLite for persistence and queryability
+
+## Requirements
+
+- Linux (uses perf events and shared memory)
+- Rust nightly (uses `let_chains` feature)
+- Frame pointers enabled for accurate stack traces
+
+## License
+
+MIT

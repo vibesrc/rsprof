@@ -22,17 +22,21 @@ rsprof-trace = { version = "0.1", features = ["profiling"] }
 ### 2. Instrument your code
 
 ```rust
-// Enable heap profiling with the custom allocator
+// Heap profiling: just set the global allocator (starts automatically)
 #[global_allocator]
 static ALLOC: rsprof_trace::ProfilingAllocator = rsprof_trace::ProfilingAllocator;
 
 fn main() {
-    // Start CPU profiling at 99Hz
+    // CPU profiling: must be started explicitly
     rsprof_trace::start_cpu_profiling(99);
 
     // Your application code...
 }
 ```
+
+> **Note**: Heap profiling starts automatically when you use `ProfilingAllocator`.
+> CPU profiling requires an explicit `start_cpu_profiling()` call because it sets up
+> a signal handler at runtime.
 
 ### 3. Build with frame pointers
 

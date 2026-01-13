@@ -154,19 +154,66 @@ fn is_internal_location(loc: &crate::symbols::Location) -> bool {
         .any(|p| loc.function.contains(p))
 }
 
+/// Patterns for utility functions that should be attributed to their callers
+const UTILITY_PATTERNS: &[&str] = &[
+    // Derived trait methods - attribute to caller
+    ">::clone",      // Clone::clone on any type
+    ">::fmt",        // Debug/Display::fmt
+    ">::hash",       // Hash::hash
+    ">::eq",         // PartialEq::eq
+    ">::partial_cmp", // PartialOrd
+    ">::cmp",        // Ord
+    // Common utility functions
+    "::utils::",
+    "::to_string",
+    "::to_owned",
+    "::into",
+];
+
+/// Check if a function is a utility function (should attribute to caller)
+fn is_utility_function(func: &str) -> bool {
+    UTILITY_PATTERNS.iter().any(|p| func.contains(p))
+}
+
 /// Find the first "user" frame in a stack trace (not allocator internals)
+/// If the first user frame is a utility function, return its caller instead.
 fn find_user_frame(stack: &[u64], resolver: &SymbolResolver) -> crate::symbols::Location {
-    // FIRST: Find the first frame with a user function name (based on function name only)
-    // This handles cases where DWARF points to stdlib source but function is user code
-    for &addr in stack {
+    let mut first_user_frame: Option<crate::symbols::Location> = None;
+    let mut first_user_idx: Option<usize> = None;
+
+    // FIRST PASS: Find the first user frame
+    for (i, &addr) in stack.iter().enumerate() {
         let loc = resolver.resolve(addr);
         // Skip internal functions based on name patterns
         let has_internal_fn = SKIP_FUNCTION_PATTERNS
             .iter()
             .any(|p| loc.function.contains(p));
-        if !has_internal_fn && !loc.function.is_empty() && loc.function != "[unknown]" {
-            return loc;
+        if !has_internal_fn
+            && !is_internal_file(&loc.file)
+            && !loc.function.is_empty()
+            && loc.function != "[unknown]"
+        {
+            first_user_frame = Some(loc);
+            first_user_idx = Some(i);
+            break;
         }
+    }
+
+    // SECOND PASS: If first user frame is a utility function, find its caller
+    if let (Some(first), Some(idx)) = (&first_user_frame, first_user_idx) {
+        if is_utility_function(&first.function) {
+            // Look for the caller (next frame that's not internal)
+            for &addr in stack.iter().skip(idx + 1) {
+                let loc = resolver.resolve(addr);
+                let has_internal_fn = SKIP_FUNCTION_PATTERNS
+                    .iter()
+                    .any(|p| loc.function.contains(p));
+                if !has_internal_fn && !loc.function.is_empty() && loc.function != "[unknown]" {
+                    return loc;
+                }
+            }
+        }
+        return first_user_frame.unwrap();
     }
 
     // Fallback: look for frames with real source paths
@@ -688,29 +735,29 @@ impl App {
                         }
                     }
 
-                    // Process heap stats from rsprof-trace
-                    let heap_stats = shm.read_stats();
-                    let inline_stacks = shm.read_inline_stacks();
-                    for (key_addr, stats) in heap_stats {
-                        let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                            find_user_frame(stack, resolver)
-                        } else {
-                            resolver.resolve(key_addr)
-                        };
-                        // Only record if we found a user frame (not internal/library code)
-                        if !is_internal_location(&location) {
-                            storage.record_heap_sample(
-                                &location,
-                                stats.total_alloc_bytes as i64,
-                                stats.total_free_bytes as i64,
-                                stats.live_bytes,
-                                stats.total_allocs,
-                                stats.total_frees,
-                            );
-                        }
-                    }
-
+                    // Checkpoint - record heap stats and flush
                     if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
+                        // Record heap stats from rsprof-trace (once per checkpoint)
+                        let heap_stats = shm.read_stats();
+                        let inline_stacks = shm.read_inline_stacks();
+                        for (key_addr, stats) in heap_stats {
+                            let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                                find_user_frame(stack, resolver)
+                            } else {
+                                resolver.resolve(key_addr)
+                            };
+                            if !is_internal_location(&location) {
+                                storage.record_heap_sample(
+                                    &location,
+                                    stats.total_alloc_bytes as i64,
+                                    stats.total_free_bytes as i64,
+                                    stats.live_bytes,
+                                    stats.total_allocs,
+                                    stats.total_frees,
+                                );
+                            }
+                        }
+
                         storage.flush_checkpoint()?;
                         self.last_checkpoint = Instant::now();
                         self.update_sparklines();
@@ -733,40 +780,32 @@ impl App {
                     }
 
                     if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
+                        // Record heap stats from eBPF sampler (once per checkpoint)
+                        if let Some(hs) = self.heap_sampler.as_ref() {
+                            let heap_stats = hs.read_stats();
+                            let inline_stacks = hs.read_inline_stacks();
+                            for (key_addr, stats) in heap_stats {
+                                let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                                    find_user_frame(stack, resolver)
+                                } else {
+                                    resolver.resolve(key_addr)
+                                };
+                                if !is_internal_location(&location) {
+                                    storage.record_heap_sample(
+                                        &location,
+                                        stats.total_alloc_bytes as i64,
+                                        stats.total_free_bytes as i64,
+                                        stats.live_bytes,
+                                        stats.total_allocs,
+                                        stats.total_frees,
+                                    );
+                                }
+                            }
+                        }
+
                         storage.flush_checkpoint()?;
                         self.last_checkpoint = Instant::now();
                         self.update_sparklines();
-                    }
-                }
-
-                // Fallback: Read heap stats from eBPF (if no SHM sampler)
-                if self.shm_heap_sampler.is_none()
-                    && let (Some(hs), Some(resolver), Some(storage)) = (
-                        self.heap_sampler.as_ref(),
-                        self.resolver.as_ref(),
-                        self.storage.as_mut(),
-                    )
-                {
-                    let heap_stats = hs.read_stats();
-                    let inline_stacks = hs.read_inline_stacks();
-
-                    for (key_addr, stats) in heap_stats {
-                        let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                            find_user_frame(stack, resolver)
-                        } else {
-                            resolver.resolve(key_addr)
-                        };
-                        // Only record if we found a user frame (not internal/library code)
-                        if !is_internal_location(&location) {
-                            storage.record_heap_sample(
-                                &location,
-                                stats.total_alloc_bytes as i64,
-                                stats.total_free_bytes as i64,
-                                stats.live_bytes,
-                                stats.total_allocs,
-                                stats.total_frees,
-                            );
-                        }
                     }
                 }
             }

@@ -897,14 +897,30 @@ fn format_function(func: &str) -> String {
         }
     }
 
+    // Simplify trait impls: <Type as Trait>::method -> Type::method
+    if result.starts_with('<') {
+        if let Some(as_pos) = result.find(" as ") {
+            if let Some(gt_pos) = result.find(">::") {
+                let impl_type = &result[1..as_pos];
+                let method = &result[gt_pos + 3..];
+                let type_short = simplify_type_path(impl_type);
+                result = format!("{}::{}", type_short, method);
+            }
+        }
+    }
+
     // Simplify common prefixes
     let prefixes = [
         ("core::slice::sort::", "sort::"),
         ("core::ptr::", "ptr::"),
         ("core::fmt::", "fmt::"),
         ("core::iter::", "iter::"),
+        ("core::hash::", "hash::"),
+        ("core::str::", "str::"),
+        ("core::num::", "num::"),
         ("alloc::vec::", "Vec::"),
         ("alloc::string::", "String::"),
+        ("alloc::alloc::", "alloc::"),
         ("hashbrown::raw::", "hashbrown::"),
         ("std::collections::hash_map::", "HashMap::"),
     ];
@@ -916,7 +932,31 @@ fn format_function(func: &str) -> String {
         }
     }
 
+    // Remove complex generic parameters
+    while let (Some(start), Some(end)) = (result.find('<'), result.rfind('>')) {
+        if start < end {
+            let generic = &result[start..=end];
+            if generic.len() > 20 || generic.contains("::") {
+                result = format!("{}<_>{}", &result[..start], &result[end + 1..]);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
     result
+}
+
+/// Simplify a type path to module::Type format
+fn simplify_type_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split("::").collect();
+    if parts.len() >= 2 {
+        format!("{}::{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    } else {
+        path.to_string()
+    }
 }
 
 /// Unicode block characters for sparklines (8 levels from empty to full)

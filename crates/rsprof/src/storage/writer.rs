@@ -105,6 +105,8 @@ impl Storage {
     }
 
     /// Record a heap sample (aggregates by location_id)
+    /// Called once per checkpoint with cumulative stats from sampler.
+    /// Multiple stack keys that resolve to the same location are summed.
     pub fn record_heap_sample(
         &mut self,
         location: &Location,
@@ -119,9 +121,10 @@ impl Storage {
             .pending_heap
             .entry(location_id)
             .or_insert((0, 0, 0, 0, 0));
+        // Sum values from different stack keys that resolve to same location
         entry.0 += alloc_bytes;
         entry.1 += free_bytes;
-        entry.2 = live_bytes; // live_bytes is a snapshot, not cumulative
+        entry.2 += live_bytes;
         entry.3 += alloc_count;
         entry.4 += free_count;
     }
@@ -617,7 +620,7 @@ pub fn query_top_heap_live(conn: &Connection, limit: usize) -> rusqlite::Result<
         FROM heap_samples hs
         JOIN locations l ON hs.location_id = l.id
         GROUP BY hs.location_id
-        ORDER BY total_alloc DESC
+        ORDER BY live DESC, total_alloc DESC
         LIMIT ?2
         "#,
     )?;

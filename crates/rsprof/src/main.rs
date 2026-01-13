@@ -299,10 +299,20 @@ fn is_internal_location(loc: &rsprof::symbols::Location) -> bool {
 
 /// Patterns for utility functions that should be attributed to their callers
 const UTILITY_PATTERNS: &[&str] = &[
+    // Derived trait methods - attribute to caller
+    ">::clone",      // Clone::clone on any type
+    ">::fmt",        // Debug/Display::fmt
+    ">::hash",       // Hash::hash
+    ">::eq",         // PartialEq::eq
+    ">::partial_cmp", // PartialOrd
+    ">::cmp",        // Ord
+    // Common utility functions
     "::utils::",
+    "::to_string",
+    "::to_owned",
+    "::into",
     "format_bytes",
     "format_size",
-    "to_string",
     "sanitize_",
     "generate_trace_id",
 ];
@@ -424,48 +434,8 @@ fn run_headless(
                 }
             }
 
-            // Process heap stats
-            let heap_stats = shm.read_stats();
-            let inline_stacks = shm.read_inline_stacks();
-            total_heap_events = heap_stats.len() as u64;
-
-            // Debug: print first few heap stats with their stacks (once, after we have data)
-            static DEBUG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let count = DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if count == 50 && !heap_stats.is_empty() {
-                eprintln!("\n=== Heap stats debug ({} sites) ===", heap_stats.len());
-                for (key_addr, stats) in heap_stats.iter().take(5) {
-                    eprintln!("Key {:016x}: {} allocs, {} bytes", key_addr, stats.total_allocs, stats.total_alloc_bytes);
-                    if let Some(stack) = inline_stacks.get(key_addr) {
-                        eprintln!("  Stack ({} frames):", stack.len());
-                        for (i, &addr) in stack.iter().enumerate() {
-                            let loc = resolver.resolve(addr);
-                            eprintln!("    [{}] {:016x} {}:{} {}", i, addr, loc.file, loc.line, loc.function);
-                        }
-                        let user_loc = find_user_frame(stack, &resolver);
-                        eprintln!("  -> User frame: {}:{} {}", user_loc.file, user_loc.line, user_loc.function);
-                    }
-                }
-            }
-
-            for (key_addr, stats) in heap_stats {
-                let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                    find_user_frame(stack, &resolver)
-                } else {
-                    resolver.resolve(key_addr)
-                };
-                // Only record if we found a user frame (not internal/library code)
-                if !is_internal_location(&location) {
-                    storage.record_heap_sample(
-                        &location,
-                        stats.total_alloc_bytes as i64,
-                        stats.total_free_bytes as i64,
-                        stats.live_bytes,
-                        stats.total_allocs,
-                        stats.total_frees,
-                    );
-                }
-            }
+            // Just update the event count - heap stats are recorded at checkpoint time
+            total_heap_events = shm.read_stats().len() as u64;
         }
 
         // Fallback to perf-based CPU sampling if no SHM sampler
@@ -483,35 +453,60 @@ fn run_headless(
             }
         }
 
-        // Read heap stats from eBPF if available (and no SHM sampler)
-        if shm_sampler.is_none()
-            && let Some(ref hs) = heap_sampler
-        {
-            let heap_stats = hs.read_stats();
-            let inline_stacks = hs.read_inline_stacks();
+        // Checkpoint - record heap stats and flush
+        if last_checkpoint.elapsed() >= checkpoint_interval {
+            // Record heap stats from SHM sampler (rsprof-trace)
+            if let Some(ref shm) = shm_sampler {
+                let heap_stats = shm.read_stats();
+                let inline_stacks = shm.read_inline_stacks();
+                total_heap_events = heap_stats.len() as u64;
 
-            for (key_addr, stats) in heap_stats {
-                let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                    find_user_frame(stack, &resolver)
-                } else {
-                    resolver.resolve(key_addr)
-                };
-                // Only record if we found a user frame (not internal/library code)
-                if !is_internal_location(&location) {
-                    storage.record_heap_sample(
-                        &location,
-                        stats.total_alloc_bytes as i64,
-                        stats.total_free_bytes as i64,
-                        stats.live_bytes,
-                        stats.total_allocs,
-                        stats.total_frees,
-                    );
+                for (key_addr, stats) in heap_stats {
+                    let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                        find_user_frame(stack, &resolver)
+                    } else {
+                        resolver.resolve(key_addr)
+                    };
+                    if !is_internal_location(&location) {
+                        storage.record_heap_sample(
+                            &location,
+                            stats.total_alloc_bytes as i64,
+                            stats.total_free_bytes as i64,
+                            stats.live_bytes,
+                            stats.total_allocs,
+                            stats.total_frees,
+                        );
+                    }
                 }
             }
-        }
 
-        // Checkpoint
-        if last_checkpoint.elapsed() >= checkpoint_interval {
+            // Record heap stats from eBPF sampler (fallback)
+            if shm_sampler.is_none() {
+                if let Some(ref hs) = heap_sampler {
+                    let heap_stats = hs.read_stats();
+                    let inline_stacks = hs.read_inline_stacks();
+                    total_heap_events = heap_stats.len() as u64;
+
+                    for (key_addr, stats) in heap_stats {
+                        let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                            find_user_frame(stack, &resolver)
+                        } else {
+                            resolver.resolve(key_addr)
+                        };
+                        if !is_internal_location(&location) {
+                            storage.record_heap_sample(
+                                &location,
+                                stats.total_alloc_bytes as i64,
+                                stats.total_free_bytes as i64,
+                                stats.live_bytes,
+                                stats.total_allocs,
+                                stats.total_frees,
+                            );
+                        }
+                    }
+                }
+            }
+
             storage.flush_checkpoint()?;
             last_checkpoint = std::time::Instant::now();
             eprint!(

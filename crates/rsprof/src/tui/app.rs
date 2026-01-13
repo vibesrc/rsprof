@@ -113,7 +113,9 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "gimli::",
     "object::",
     "miniz_oxide::",
+    "rustc_demangle::",
     "rsprof_alloc::",
+    "rsprof_trace::",
     "profiling::",
     "rsprof::",
     // Sorting internals
@@ -131,7 +133,15 @@ fn is_internal_file(file: &str) -> bool {
         || file.contains("/.cargo/registry/")
         || file.contains("/rust/library/")
         || file.contains("rsprof-alloc")
+        || file.contains("rsprof-trace")
         || file.contains("profiling.rs")
+        || file == "lib.rs"
+        || file == "time.rs"
+        || file == "unix.rs"
+        || file.ends_with("memchr.rs")
+        || file.ends_with("maybe_uninit.rs")
+        || file.ends_with("methods.rs")
+        || (file.ends_with("mod.rs") && !file.contains("/src/"))
 }
 
 /// Check if a location is internal (profiler/library code)

@@ -26,19 +26,19 @@ const EVENT_TYPE_ALLOC: u8 = 1;
 const EVENT_TYPE_DEALLOC: u8 = 2;
 const EVENT_TYPE_CPU_SAMPLE: u8 = 3;
 
-/// Number of stack frames to use for keying
-/// Must be large enough to include user frames after allocator internals (~6-8 frames)
-const STACK_KEY_FRAMES: usize = 16;
-
-/// Compute a hash key from the first few stack frames.
-/// This distinguishes different call sites that might share the same immediate return address.
+/// Get aggregation key from stack.
+/// Skip the first 6 frames (allocator/profiler internals), then hash the next 6 frames
+/// to differentiate allocation sites while capturing user code context.
+///
+/// Using more frames in the key helps differentiate allocations that go through
+/// the same library code but originate from different user code paths.
+#[inline]
 fn stack_key(stack: &[u64]) -> u64 {
+    // Skip first 6 frames, hash next 6 frames for better differentiation
     let mut key = 0u64;
-    for (i, &addr) in stack.iter().take(STACK_KEY_FRAMES).enumerate() {
-        // Mix each frame address into the key using FNV-1a style mixing
+    for &addr in stack.iter().skip(6).take(6) {
         key ^= addr;
         key = key.wrapping_mul(0x100000001b3);
-        key ^= i as u64;
     }
     key
 }

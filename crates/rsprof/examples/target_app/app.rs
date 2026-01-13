@@ -1,5 +1,6 @@
 //! Main application logic
 
+use crate::audit_log;
 use crate::cache::DataCache;
 use crate::metrics;
 use crate::processing::RequestProcessor;
@@ -54,6 +55,9 @@ impl Application {
             self.stats.errors += 1;
             return;
         }
+
+        // Log audit event (MEMORY LEAK!)
+        audit_log::log_audit_event("process", &request.key, &request.payload);
 
         // Check cache first
         if let Some(_cached) = self.cache.get(&request.key) {

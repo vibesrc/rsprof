@@ -128,7 +128,9 @@ mod enabled {
     }
 
     unsafe impl<const CPU_FREQ: u32> GlobalAlloc for ProfilingAllocator<CPU_FREQ> {
-        #[inline]
+        // IMPORTANT: These must NOT be inlined!
+        // If inlined into libstd (which has no frame pointers), stack capture breaks.
+        #[inline(never)]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             maybe_init_cpu::<CPU_FREQ>();
             let ptr = unsafe { libc::malloc(layout.size()) as *mut u8 };
@@ -138,13 +140,13 @@ mod enabled {
             ptr
         }
 
-        #[inline]
+        #[inline(never)]
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
             record_dealloc(ptr, layout.size());
             unsafe { libc::free(ptr as *mut libc::c_void) }
         }
 
-        #[inline]
+        #[inline(never)]
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             record_dealloc(ptr, layout.size());
             let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
@@ -154,7 +156,7 @@ mod enabled {
             new_ptr
         }
 
-        #[inline]
+        #[inline(never)]
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             maybe_init_cpu::<CPU_FREQ>();
             let ptr = unsafe { libc::calloc(1, layout.size()) as *mut u8 };

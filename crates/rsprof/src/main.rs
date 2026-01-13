@@ -204,6 +204,9 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "core::ptr::",
     "core::slice::",
     "core::iter::",
+    "core::sync::",  // atomics, etc.
+    "core::option::",
+    "core::result::",
     "<core::",
     "core::ops::function::",
     "core::ops::drop::",
@@ -251,7 +254,9 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "gimli::",
     "object::",
     "miniz_oxide::",
+    "rustc_demangle::",  // demangling library
     "rsprof_alloc::",
+    "rsprof_trace::",  // profiling library
     "profiling::",
     "rsprof::",
     // Sorting internals
@@ -269,7 +274,12 @@ fn is_internal_file(file: &str) -> bool {
         || file.contains("/.cargo/registry/")
         || file.contains("/rust/library/")
         || file.contains("rsprof-alloc")  // profiler internals
+        || file.contains("rsprof-trace")  // profiler internals
         || file.contains("profiling.rs")  // profiler internals
+        // Bare filenames without path context are usually library code
+        || file == "lib.rs"
+        || file == "time.rs"
+        || file == "unix.rs"
         // Common library source files
         || file.ends_with("memchr.rs")
         || file.ends_with("maybe_uninit.rs")
@@ -287,22 +297,61 @@ fn is_internal_location(loc: &rsprof::symbols::Location) -> bool {
         .any(|p| loc.function.contains(p))
 }
 
-/// Find the first "user" frame in a stack trace (not allocator internals)
+/// Patterns for utility functions that should be attributed to their callers
+const UTILITY_PATTERNS: &[&str] = &[
+    "::utils::",
+    "format_bytes",
+    "format_size",
+    "to_string",
+    "sanitize_",
+    "generate_trace_id",
+];
+
+/// Check if a function is a utility function (should attribute to caller)
+fn is_utility_function(func: &str) -> bool {
+    UTILITY_PATTERNS.iter().any(|p| func.contains(p))
+}
+
+/// Find the best "user" frame in a stack trace.
+/// If the first user frame is a utility function, return its caller instead.
 fn find_user_frame(
     stack: &[u64],
     resolver: &rsprof::symbols::SymbolResolver,
 ) -> rsprof::symbols::Location {
-    // FIRST: Find the first frame with a user function name (based on function name only)
-    // This handles cases where DWARF points to stdlib source but function is user code
-    for &addr in stack {
+    let mut first_user_frame: Option<rsprof::symbols::Location> = None;
+    let mut first_user_idx: Option<usize> = None;
+
+    // FIRST PASS: Find the first user frame
+    for (i, &addr) in stack.iter().enumerate() {
         let loc = resolver.resolve(addr);
-        // Skip internal functions based on name patterns
-        let has_internal_fn = SKIP_FUNCTION_PATTERNS
-            .iter()
-            .any(|p| loc.function.contains(p));
-        if !has_internal_fn && !loc.function.is_empty() && loc.function != "[unknown]" {
-            return loc;
+        // Skip internal files and functions
+        if is_internal_file(&loc.file) || is_internal_location(&loc) {
+            continue;
         }
+        if !loc.function.is_empty() && loc.function != "[unknown]" {
+            first_user_frame = Some(loc);
+            first_user_idx = Some(i);
+            break;
+        }
+    }
+
+    // If first user frame is a utility function, look for its caller
+    if let (Some(first_loc), Some(first_idx)) = (&first_user_frame, first_user_idx) {
+        if is_utility_function(&first_loc.function) {
+            // Look for the next user frame (caller of the utility)
+            for &addr in stack.iter().skip(first_idx + 1) {
+                let loc = resolver.resolve(addr);
+                let has_internal_fn = SKIP_FUNCTION_PATTERNS
+                    .iter()
+                    .any(|p| loc.function.contains(p));
+                if !has_internal_fn && !loc.function.is_empty() && loc.function != "[unknown]" {
+                    // Found the caller - return it
+                    return loc;
+                }
+            }
+        }
+        // Return the first user frame if no better caller found
+        return first_user_frame.unwrap();
     }
 
     // Fallback: look for frames with real source paths
@@ -313,12 +362,14 @@ fn find_user_frame(
         }
     }
 
-    // Last resort: first address
-    if !stack.is_empty() {
-        return resolver.resolve(stack[0]);
+    // No user frame found - return a marker that will be filtered out
+    // by is_internal_location (empty function name or internal file)
+    rsprof::symbols::Location {
+        file: "[internal]".to_string(),
+        line: 0,
+        column: 0,
+        function: "[internal]".to_string(),
     }
-
-    resolver.resolve(0)
 }
 
 fn run_headless(
@@ -377,6 +428,25 @@ fn run_headless(
             let heap_stats = shm.read_stats();
             let inline_stacks = shm.read_inline_stacks();
             total_heap_events = heap_stats.len() as u64;
+
+            // Debug: print first few heap stats with their stacks (once, after we have data)
+            static DEBUG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 50 && !heap_stats.is_empty() {
+                eprintln!("\n=== Heap stats debug ({} sites) ===", heap_stats.len());
+                for (key_addr, stats) in heap_stats.iter().take(5) {
+                    eprintln!("Key {:016x}: {} allocs, {} bytes", key_addr, stats.total_allocs, stats.total_alloc_bytes);
+                    if let Some(stack) = inline_stacks.get(key_addr) {
+                        eprintln!("  Stack ({} frames):", stack.len());
+                        for (i, &addr) in stack.iter().enumerate() {
+                            let loc = resolver.resolve(addr);
+                            eprintln!("    [{}] {:016x} {}:{} {}", i, addr, loc.file, loc.line, loc.function);
+                        }
+                        let user_loc = find_user_frame(stack, &resolver);
+                        eprintln!("  -> User frame: {}:{} {}", user_loc.file, user_loc.line, user_loc.function);
+                    }
+                }
+            }
 
             for (key_addr, stats) in heap_stats {
                 let location = if let Some(stack) = inline_stacks.get(&key_addr) {

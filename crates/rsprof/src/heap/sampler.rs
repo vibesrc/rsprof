@@ -14,17 +14,15 @@ mod heap_skel {
 
 use heap_skel::*;
 
-/// Number of stack frames to use for keying
-/// Must be large enough to include user frames after allocator internals
-const STACK_KEY_FRAMES: usize = 16;
-
-/// Compute a hash key from the first few stack frames.
+/// Get aggregation key from stack.
+/// Skip the first few frames (allocator/profiler internals that are identical
+/// for all allocations) and use frames 4-8 which should contain user code.
+#[inline]
 fn stack_key(stack: &[u64]) -> u64 {
     let mut key = 0u64;
-    for (i, &addr) in stack.iter().take(STACK_KEY_FRAMES).enumerate() {
+    for &addr in stack.iter().skip(4).take(4) {
         key ^= addr;
         key = key.wrapping_mul(0x100000001b3);
-        key ^= i as u64;
     }
     key
 }

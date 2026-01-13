@@ -73,15 +73,17 @@ impl MemoryMaps {
     pub fn aslr_offset(&self, exe_path: &Path) -> Result<u64> {
         let exe_str = exe_path.to_string_lossy();
 
-        // Find the first executable mapping of the target binary
+        // Find the FIRST mapping of the target binary (any permission, including r--p)
+        // The first mapping typically has file offset 0 and gives us the true load base.
+        // Using the executable segment (r-xp) is incorrect because its file offset is
+        // non-zero (typically 0x1000+), leading to a wrong ASLR base calculation.
         for mapping in &self.mappings {
-            if mapping.is_executable()
-                && let Some(ref pathname) = mapping.pathname
+            if let Some(ref pathname) = mapping.pathname
                 && (pathname == exe_str.as_ref()
                     || pathname.ends_with(exe_path.file_name().unwrap().to_str().unwrap()))
             {
-                // For PIE binaries, the offset is the start address minus the file offset
-                // Usually the first executable segment starts at 0 in the file
+                // For PIE binaries, ASLR offset = virtual_addr - file_offset
+                // The first segment usually has offset 0, giving us the true base
                 return Ok(mapping.start - mapping.offset);
             }
         }

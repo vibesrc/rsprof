@@ -9,6 +9,7 @@
 //! CHALLENGE: Find the 3 major optimization targets!
 
 mod app;
+mod audit_log;
 mod cache;
 mod metrics;
 mod processing;

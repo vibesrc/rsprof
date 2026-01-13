@@ -33,10 +33,10 @@ clean:
 	rm -f rsprof.*.db
 
 # Example target app - debug build for accurate stack traces
-target:
+build-target:
 	RUSTFLAGS="-C force-frame-pointers=yes" cargo build -p rsprof --example target_app
 
-run-target: target
+target: build-target
 	./target/debug/examples/target_app
 
 # Profile the running target app

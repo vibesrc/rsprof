@@ -68,6 +68,10 @@ static IN_SIGNAL_HANDLER: AtomicBool = AtomicBool::new(false);
 static mut RING_BUFFER: *mut u8 = core::ptr::null_mut();
 static mut START_TIME: u64 = 0;
 
+/// Binary code segment range (for filtering stack addresses)
+static mut CODE_START: u64 = 0;
+static mut CODE_END: u64 = 0;
+
 /// Initialize the profiler - sets up shared memory ring buffer
 pub fn init() {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
@@ -82,6 +86,69 @@ pub fn init() {
         };
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
         START_TIME = (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
+
+        // Detect binary code segment from /proc/self/maps
+        // We look for the r-xp mapping (executable) for our binary
+        let fd = libc::open(b"/proc/self/maps\0".as_ptr() as *const libc::c_char, libc::O_RDONLY);
+        if fd >= 0 {
+            let mut buf = [0u8; 8192];
+            let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+            libc::close(fd);
+
+            if n > 0 {
+                // Parse maps to find executable segment
+                // Format: "addr_start-addr_end perms offset dev inode pathname"
+                // We want the r-xp line (executable, not writable)
+                let mut i = 0;
+                while i < n as usize {
+                    // Find the start of the address range
+                    let mut addr_start = 0u64;
+                    let mut addr_end = 0u64;
+
+                    // Parse start address (hex until '-')
+                    while i < n as usize && buf[i] != b'-' {
+                        let c = buf[i];
+                        addr_start = addr_start * 16 + match c {
+                            b'0'..=b'9' => (c - b'0') as u64,
+                            b'a'..=b'f' => (c - b'a' + 10) as u64,
+                            _ => 0,
+                        };
+                        i += 1;
+                    }
+                    if i < n as usize { i += 1; } // skip '-'
+
+                    // Parse end address (hex until ' ')
+                    while i < n as usize && buf[i] != b' ' {
+                        let c = buf[i];
+                        addr_end = addr_end * 16 + match c {
+                            b'0'..=b'9' => (c - b'0') as u64,
+                            b'a'..=b'f' => (c - b'a' + 10) as u64,
+                            _ => 0,
+                        };
+                        i += 1;
+                    }
+                    if i < n as usize { i += 1; } // skip ' '
+
+                    // Check permissions - looking for "r-xp" (executable)
+                    if i + 4 <= n as usize && buf[i] == b'r' && buf[i+2] == b'x' && buf[i+3] == b'p' {
+                        // Found executable segment - store it
+                        if CODE_START == 0 {
+                            CODE_START = addr_start;
+                            CODE_END = addr_end;
+                        }
+                    }
+
+                    // Skip to next line
+                    while i < n as usize && buf[i] != b'\n' {
+                        i += 1;
+                    }
+                    if i < n as usize { i += 1; }
+
+                    // Only parse first few lines (our binary's mappings come first)
+                    if i > 2000 { break; }
+                }
+            }
+        }
 
         // Calculate shared memory size
         let buffer_size = core::mem::size_of::<RingBufferHeader>()
@@ -154,59 +221,117 @@ fn capture_stack(stack: &mut [u64; MAX_STACK_DEPTH]) -> u32 {
     capture_stack_from_fp(stack, core::ptr::null())
 }
 
-/// Capture stack trace starting from a specific frame pointer
-/// If start_fp is null, uses current RBP
-#[inline]
+/// Capture stack trace by walking frame pointers
+/// Requires binary to be built with -C force-frame-pointers=yes
+#[inline(never)]
 fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const usize) -> u32 {
     let mut depth = 0u32;
 
     unsafe {
         // Get starting frame pointer
         let mut fp: *const usize = if start_fp.is_null() {
-            let mut current_fp: *const usize;
+            let current_fp: *const usize;
             core::arch::asm!(
                 "mov {}, rbp",
                 out(reg) current_fp,
-                options(nomem, nostack)
+                options(nomem, nostack, preserves_flags)
             );
             current_fp
         } else {
             start_fp
         };
 
+        // Debug: print first few frames once
+        static DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+        let count = DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+        let do_debug = count == 5000;
+
+        // Print initial RBP and this function's address
+        if do_debug {
+            // Print RBP
+            let mut buf = [0u8; 32];
+            buf[0] = b'R';
+            buf[1] = b'B';
+            buf[2] = b'P';
+            buf[3] = b':';
+            let rbp_val = fp as u64;
+            for i in 0..16 {
+                let nibble = ((rbp_val >> ((15 - i) * 4)) & 0xf) as u8;
+                buf[4 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+            }
+            buf[20] = b'\n';
+            let _ = libc::write(2, buf.as_ptr() as _, 21);
+
+            // Print this function's address for reference
+            let fn_addr = capture_stack_from_fp as *const () as u64;
+            buf[0] = b'F';
+            buf[1] = b'N';
+            buf[2] = b'A';
+            buf[3] = b':';
+            for i in 0..16 {
+                let nibble = ((fn_addr >> ((15 - i) * 4)) & 0xf) as u8;
+                buf[4 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+            }
+            buf[20] = b'\n';
+            let _ = libc::write(2, buf.as_ptr() as _, 21);
+        }
+
         // Walk the stack using frame pointers
-        // Frame layout: [saved_rbp][return_addr]
         while !fp.is_null() && depth < MAX_STACK_DEPTH as u32 {
-            // Validate frame pointer is reasonably aligned and readable
+            // Validate frame pointer alignment
             if (fp as usize) & 0x7 != 0 {
+                if do_debug { let _ = libc::write(2, b"ALIGN\n".as_ptr() as _, 6); }
                 break;
             }
 
-            // Basic bounds check - frame pointer should be in a reasonable range
+            // Bounds check
             let fp_val = fp as usize;
             if !(0x1000..=0x7fff_ffff_ffff).contains(&fp_val) {
+                if do_debug { let _ = libc::write(2, b"BOUNDS\n".as_ptr() as _, 7); }
                 break;
             }
 
-            // Read return address (at fp + 8)
-            let ret_addr_ptr = fp.add(1);
-            let ret_addr = *ret_addr_ptr;
+            // Read return address at [fp + 8]
+            let ret_addr = *fp.add(1);
             if ret_addr == 0 {
+                if do_debug { let _ = libc::write(2, b"ZERO\n".as_ptr() as _, 5); }
                 break;
+            }
+
+            // Debug print frame
+            if do_debug && depth < 10 {
+                let mut buf = [0u8; 32];
+                buf[0] = b'F';
+                buf[1] = b'0' + (depth as u8);
+                buf[2] = b':';
+                for i in 0..16 {
+                    let nibble = ((ret_addr >> ((15 - i) * 4)) & 0xf) as u8;
+                    buf[3 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                }
+                buf[19] = b'\n';
+                let _ = libc::write(2, buf.as_ptr() as _, 20);
             }
 
             stack[depth as usize] = ret_addr as u64;
             depth += 1;
 
-            // Get next frame pointer
+            // Move to next frame (saved RBP is at [fp])
             let next_fp = *fp as *const usize;
-
-            // Ensure we're moving up the stack (frame pointer should increase)
             if next_fp <= fp {
+                if do_debug { let _ = libc::write(2, b"BACKWARDS\n".as_ptr() as _, 10); }
                 break;
             }
-
             fp = next_fp;
+        }
+
+        if do_debug {
+            let mut buf = [0u8; 16];
+            let msg = b"DEPTH:";
+            buf[..6].copy_from_slice(msg);
+            buf[6] = b'0' + ((depth / 10) as u8);
+            buf[7] = b'0' + ((depth % 10) as u8);
+            buf[8] = b'\n';
+            let _ = libc::write(2, buf.as_ptr() as _, 9);
         }
     }
 
@@ -214,13 +339,13 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
 }
 
 /// Record an event to the ring buffer
-#[inline]
+#[inline(never)]
 fn record_event_internal(event_type: EventType, ptr: u64, size: u64) {
     record_event_with_fp(event_type, ptr, size, core::ptr::null())
 }
 
 /// Record an event with a specific starting frame pointer
-#[inline]
+#[inline(never)]
 fn record_event_with_fp(event_type: EventType, ptr: u64, size: u64, start_fp: *const usize) {
     unsafe {
         if RING_BUFFER.is_null() {
@@ -254,7 +379,7 @@ fn record_event_with_fp(event_type: EventType, ptr: u64, size: u64, start_fp: *c
 
 /// Record an allocation event
 #[cfg(feature = "heap")]
-#[inline]
+#[inline(never)]
 pub fn record_alloc(ptr: *mut u8, size: usize) {
     // Don't record allocations from within signal handler
     if IN_SIGNAL_HANDLER.load(Ordering::Relaxed) {
@@ -271,7 +396,7 @@ pub fn record_alloc(ptr: *mut u8, size: usize) {
 
 /// Record a deallocation event
 #[cfg(feature = "heap")]
-#[inline]
+#[inline(never)]
 pub fn record_dealloc(ptr: *mut u8, size: usize) {
     // Don't record deallocations from within signal handler
     if IN_SIGNAL_HANDLER.load(Ordering::Relaxed) {

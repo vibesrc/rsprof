@@ -37,7 +37,7 @@ fn main() {
     loop {
         application.tick();
 
-        if application.tick_count() % 500 == 0 {
+        if application.tick_count().is_multiple_of(500) {
             println!(
                 "[{:>5.1}s] processed={:<6} cache_hits={:<5} errors={:<3}",
                 start.elapsed().as_secs_f64(),

@@ -85,10 +85,10 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "fmt::num::",
     "fmt::Write::",
     // Trait implementations (raw DWARF names)
-    " as core::fmt::",   // <T as core::fmt::Display>::fmt
-    " as std::fmt::",    // <T as std::fmt::Write>::write
-    " as core::hash::",  // <T as core::hash::Hash>::hash
-    " as alloc::",       // <T as alloc::*>::method
+    " as core::fmt::",  // <T as core::fmt::Display>::fmt
+    " as std::fmt::",   // <T as std::fmt::Write>::write
+    " as core::hash::", // <T as core::hash::Hash>::hash
+    " as alloc::",      // <T as alloc::*>::method
     // Trait implementations on generic types
     "<_>::", // any method on trait objects
     // Libc functions
@@ -157,12 +157,12 @@ fn is_internal_location(loc: &crate::symbols::Location) -> bool {
 /// Patterns for utility functions that should be attributed to their callers
 const UTILITY_PATTERNS: &[&str] = &[
     // Derived trait methods - attribute to caller
-    ">::clone",      // Clone::clone on any type
-    ">::fmt",        // Debug/Display::fmt
-    ">::hash",       // Hash::hash
-    ">::eq",         // PartialEq::eq
+    ">::clone",       // Clone::clone on any type
+    ">::fmt",         // Debug/Display::fmt
+    ">::hash",        // Hash::hash
+    ">::eq",          // PartialEq::eq
     ">::partial_cmp", // PartialOrd
-    ">::cmp",        // Ord
+    ">::cmp",         // Ord
     // Common utility functions
     "::utils::",
     "::to_string",

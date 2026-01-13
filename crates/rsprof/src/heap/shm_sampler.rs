@@ -208,7 +208,7 @@ impl ShmHeapSampler {
     /// different call sites that share the same immediate return address.
     pub fn read_inline_stacks(&self) -> HashMap<u64, Vec<u64>> {
         let mut result = HashMap::new();
-        for (_, (_, stack)) in &self.live_allocs {
+        for (_, stack) in self.live_allocs.values() {
             if !stack.is_empty() {
                 let key = stack_key(stack);
                 result.entry(key).or_insert_with(|| stack.clone());

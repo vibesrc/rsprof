@@ -898,15 +898,14 @@ fn format_function(func: &str) -> String {
     }
 
     // Simplify trait impls: <Type as Trait>::method -> Type::method
-    if result.starts_with('<') {
-        if let Some(as_pos) = result.find(" as ") {
-            if let Some(gt_pos) = result.find(">::") {
-                let impl_type = &result[1..as_pos];
-                let method = &result[gt_pos + 3..];
-                let type_short = simplify_type_path(impl_type);
-                result = format!("{}::{}", type_short, method);
-            }
-        }
+    if result.starts_with('<')
+        && let Some(as_pos) = result.find(" as ")
+        && let Some(gt_pos) = result.find(">::")
+    {
+        let impl_type = &result[1..as_pos];
+        let method = &result[gt_pos + 3..];
+        let type_short = simplify_type_path(impl_type);
+        result = format!("{}::{}", type_short, method);
     }
 
     // Simplify common prefixes

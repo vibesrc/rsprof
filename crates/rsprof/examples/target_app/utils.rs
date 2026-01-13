@@ -31,7 +31,13 @@ pub fn generate_trace_id() -> String {
 #[inline(never)]
 pub fn sanitize_for_log(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '.' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '.'
+            }
+        })
         .collect()
 }
 

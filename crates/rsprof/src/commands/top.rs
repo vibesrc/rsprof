@@ -319,18 +319,17 @@ fn format_function(func: &str) -> String {
 
     // Simplify trait impls: <Type as Trait>::method -> Type::method
     // Pattern: <path::to::Type as path::to::Trait>::method
-    if result.starts_with('<') {
-        if let Some(as_pos) = result.find(" as ") {
-            if let Some(gt_pos) = result.find(">::") {
-                // Extract the implementing type (between < and " as ")
-                let impl_type = &result[1..as_pos];
-                // Extract the method (after >::)
-                let method = &result[gt_pos + 3..];
-                // Simplify the type path - take last 2 components
-                let type_short = simplify_type_path(impl_type);
-                result = format!("{}::{}", type_short, method);
-            }
-        }
+    if result.starts_with('<')
+        && let Some(as_pos) = result.find(" as ")
+        && let Some(gt_pos) = result.find(">::")
+    {
+        // Extract the implementing type (between < and " as ")
+        let impl_type = &result[1..as_pos];
+        // Extract the method (after >::)
+        let method = &result[gt_pos + 3..];
+        // Simplify the type path - take last 2 components
+        let type_short = simplify_type_path(impl_type);
+        result = format!("{}::{}", type_short, method);
     }
 
     // Simplify common prefixes

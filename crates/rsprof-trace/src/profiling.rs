@@ -89,7 +89,7 @@ pub fn init() {
 
         // Detect binary code segment from /proc/self/maps
         // We look for the r-xp mapping (executable) for our binary
-        let fd = libc::open(b"/proc/self/maps\0".as_ptr() as *const libc::c_char, libc::O_RDONLY);
+        let fd = libc::open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY);
         if fd >= 0 {
             let mut buf = [0u8; 8192];
             let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
@@ -108,29 +108,39 @@ pub fn init() {
                     // Parse start address (hex until '-')
                     while i < n as usize && buf[i] != b'-' {
                         let c = buf[i];
-                        addr_start = addr_start * 16 + match c {
-                            b'0'..=b'9' => (c - b'0') as u64,
-                            b'a'..=b'f' => (c - b'a' + 10) as u64,
-                            _ => 0,
-                        };
+                        addr_start = addr_start * 16
+                            + match c {
+                                b'0'..=b'9' => (c - b'0') as u64,
+                                b'a'..=b'f' => (c - b'a' + 10) as u64,
+                                _ => 0,
+                            };
                         i += 1;
                     }
-                    if i < n as usize { i += 1; } // skip '-'
+                    if i < n as usize {
+                        i += 1;
+                    } // skip '-'
 
                     // Parse end address (hex until ' ')
                     while i < n as usize && buf[i] != b' ' {
                         let c = buf[i];
-                        addr_end = addr_end * 16 + match c {
-                            b'0'..=b'9' => (c - b'0') as u64,
-                            b'a'..=b'f' => (c - b'a' + 10) as u64,
-                            _ => 0,
-                        };
+                        addr_end = addr_end * 16
+                            + match c {
+                                b'0'..=b'9' => (c - b'0') as u64,
+                                b'a'..=b'f' => (c - b'a' + 10) as u64,
+                                _ => 0,
+                            };
                         i += 1;
                     }
-                    if i < n as usize { i += 1; } // skip ' '
+                    if i < n as usize {
+                        i += 1;
+                    } // skip ' '
 
                     // Check permissions - looking for "r-xp" (executable)
-                    if i + 4 <= n as usize && buf[i] == b'r' && buf[i+2] == b'x' && buf[i+3] == b'p' {
+                    if i + 4 <= n as usize
+                        && buf[i] == b'r'
+                        && buf[i + 2] == b'x'
+                        && buf[i + 3] == b'p'
+                    {
                         // Found executable segment - store it
                         if CODE_START == 0 {
                             CODE_START = addr_start;
@@ -142,10 +152,14 @@ pub fn init() {
                     while i < n as usize && buf[i] != b'\n' {
                         i += 1;
                     }
-                    if i < n as usize { i += 1; }
+                    if i < n as usize {
+                        i += 1;
+                    }
 
                     // Only parse first few lines (our binary's mappings come first)
-                    if i > 2000 { break; }
+                    if i > 2000 {
+                        break;
+                    }
                 }
             }
         }
@@ -257,7 +271,11 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
             let rbp_val = fp as u64;
             for i in 0..16 {
                 let nibble = ((rbp_val >> ((15 - i) * 4)) & 0xf) as u8;
-                buf[4 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                buf[4 + i] = if nibble < 10 {
+                    b'0' + nibble
+                } else {
+                    b'a' + nibble - 10
+                };
             }
             buf[20] = b'\n';
             let _ = libc::write(2, buf.as_ptr() as _, 21);
@@ -270,7 +288,11 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
             buf[3] = b':';
             for i in 0..16 {
                 let nibble = ((fn_addr >> ((15 - i) * 4)) & 0xf) as u8;
-                buf[4 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                buf[4 + i] = if nibble < 10 {
+                    b'0' + nibble
+                } else {
+                    b'a' + nibble - 10
+                };
             }
             buf[20] = b'\n';
             let _ = libc::write(2, buf.as_ptr() as _, 21);
@@ -280,21 +302,27 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
         while !fp.is_null() && depth < MAX_STACK_DEPTH as u32 {
             // Validate frame pointer alignment
             if (fp as usize) & 0x7 != 0 {
-                if do_debug { let _ = libc::write(2, b"ALIGN\n".as_ptr() as _, 6); }
+                if do_debug {
+                    let _ = libc::write(2, b"ALIGN\n".as_ptr() as _, 6);
+                }
                 break;
             }
 
             // Bounds check
             let fp_val = fp as usize;
             if !(0x1000..=0x7fff_ffff_ffff).contains(&fp_val) {
-                if do_debug { let _ = libc::write(2, b"BOUNDS\n".as_ptr() as _, 7); }
+                if do_debug {
+                    let _ = libc::write(2, b"BOUNDS\n".as_ptr() as _, 7);
+                }
                 break;
             }
 
             // Read return address at [fp + 8]
             let ret_addr = *fp.add(1);
             if ret_addr == 0 {
-                if do_debug { let _ = libc::write(2, b"ZERO\n".as_ptr() as _, 5); }
+                if do_debug {
+                    let _ = libc::write(2, b"ZERO\n".as_ptr() as _, 5);
+                }
                 break;
             }
 
@@ -306,7 +334,11 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
                 buf[2] = b':';
                 for i in 0..16 {
                     let nibble = ((ret_addr >> ((15 - i) * 4)) & 0xf) as u8;
-                    buf[3 + i] = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+                    buf[3 + i] = if nibble < 10 {
+                        b'0' + nibble
+                    } else {
+                        b'a' + nibble - 10
+                    };
                 }
                 buf[19] = b'\n';
                 let _ = libc::write(2, buf.as_ptr() as _, 20);
@@ -318,7 +350,9 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
             // Move to next frame (saved RBP is at [fp])
             let next_fp = *fp as *const usize;
             if next_fp <= fp {
-                if do_debug { let _ = libc::write(2, b"BACKWARDS\n".as_ptr() as _, 10); }
+                if do_debug {
+                    let _ = libc::write(2, b"BACKWARDS\n".as_ptr() as _, 10);
+                }
                 break;
             }
             fp = next_fp;

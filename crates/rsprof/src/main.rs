@@ -204,7 +204,7 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "core::ptr::",
     "core::slice::",
     "core::iter::",
-    "core::sync::",  // atomics, etc.
+    "core::sync::", // atomics, etc.
     "core::option::",
     "core::result::",
     "<core::",
@@ -226,10 +226,10 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "fmt::num::",
     "fmt::Write::",
     // Trait implementations (raw DWARF names)
-    " as core::fmt::",   // <T as core::fmt::Display>::fmt
-    " as std::fmt::",    // <T as std::fmt::Write>::write
-    " as core::hash::",  // <T as core::hash::Hash>::hash
-    " as alloc::",       // <T as alloc::*>::method
+    " as core::fmt::",  // <T as core::fmt::Display>::fmt
+    " as std::fmt::",   // <T as std::fmt::Write>::write
+    " as core::hash::", // <T as core::hash::Hash>::hash
+    " as alloc::",      // <T as alloc::*>::method
     // Trait implementations on generic types
     "<_>::", // any method on trait objects
     // Libc functions
@@ -254,9 +254,9 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "gimli::",
     "object::",
     "miniz_oxide::",
-    "rustc_demangle::",  // demangling library
+    "rustc_demangle::", // demangling library
     "rsprof_alloc::",
-    "rsprof_trace::",  // profiling library
+    "rsprof_trace::", // profiling library
     "profiling::",
     "rsprof::",
     // Sorting internals
@@ -300,12 +300,12 @@ fn is_internal_location(loc: &rsprof::symbols::Location) -> bool {
 /// Patterns for utility functions that should be attributed to their callers
 const UTILITY_PATTERNS: &[&str] = &[
     // Derived trait methods - attribute to caller
-    ">::clone",      // Clone::clone on any type
-    ">::fmt",        // Debug/Display::fmt
-    ">::hash",       // Hash::hash
-    ">::eq",         // PartialEq::eq
+    ">::clone",       // Clone::clone on any type
+    ">::fmt",         // Debug/Display::fmt
+    ">::hash",        // Hash::hash
+    ">::eq",          // PartialEq::eq
     ">::partial_cmp", // PartialOrd
-    ">::cmp",        // Ord
+    ">::cmp",         // Ord
     // Common utility functions
     "::utils::",
     "::to_string",
@@ -481,28 +481,28 @@ fn run_headless(
             }
 
             // Record heap stats from eBPF sampler (fallback)
-            if shm_sampler.is_none() {
-                if let Some(ref hs) = heap_sampler {
-                    let heap_stats = hs.read_stats();
-                    let inline_stacks = hs.read_inline_stacks();
-                    total_heap_events = heap_stats.len() as u64;
+            if shm_sampler.is_none()
+                && let Some(ref hs) = heap_sampler
+            {
+                let heap_stats = hs.read_stats();
+                let inline_stacks = hs.read_inline_stacks();
+                total_heap_events = heap_stats.len() as u64;
 
-                    for (key_addr, stats) in heap_stats {
-                        let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                            find_user_frame(stack, &resolver)
-                        } else {
-                            resolver.resolve(key_addr)
-                        };
-                        if !is_internal_location(&location) {
-                            storage.record_heap_sample(
-                                &location,
-                                stats.total_alloc_bytes as i64,
-                                stats.total_free_bytes as i64,
-                                stats.live_bytes,
-                                stats.total_allocs,
-                                stats.total_frees,
-                            );
-                        }
+                for (key_addr, stats) in heap_stats {
+                    let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                        find_user_frame(stack, &resolver)
+                    } else {
+                        resolver.resolve(key_addr)
+                    };
+                    if !is_internal_location(&location) {
+                        storage.record_heap_sample(
+                            &location,
+                            stats.total_alloc_bytes as i64,
+                            stats.total_free_bytes as i64,
+                            stats.live_bytes,
+                            stats.total_allocs,
+                            stats.total_frees,
+                        );
                     }
                 }
             }

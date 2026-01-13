@@ -17,6 +17,7 @@ struct AuditLogger {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // Fields intentionally unused - CTF memory leak demo
 struct AuditEntry {
     timestamp: u64,
     operation: String,
@@ -121,13 +122,18 @@ fn flush_audit_log_unsafe(logger: &mut AuditLogger) {
 
 /// Get current memory pressure (for debugging)
 #[inline(never)]
+#[allow(dead_code)] // Available for debugging but not used in main loop
 pub fn get_audit_memory_usage() -> usize {
     let logger = AUDIT_LOG.get_or_init(|| Mutex::new(AuditLogger::new()));
     if let Ok(guard) = logger.lock() {
-        let pending: usize = guard.pending_entries.iter()
+        let pending: usize = guard
+            .pending_entries
+            .iter()
             .map(|e| e.backup_blob.len() + e.details.len() + e.operation.len())
             .sum();
-        let archived: usize = guard.archived_entries.iter()
+        let archived: usize = guard
+            .archived_entries
+            .iter()
             .map(|e| e.backup_blob.len() + e.details.len() + e.operation.len())
             .sum();
         pending + archived

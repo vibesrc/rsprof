@@ -51,6 +51,7 @@ fn compute_mean(samples: &[f64]) -> f64 {
 #[inline(never)]
 fn compute_stddev(samples: &[f64]) -> f64 {
     let mean = compute_mean(samples);
-    let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let variance: f64 =
+        samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     variance.sqrt()
 }

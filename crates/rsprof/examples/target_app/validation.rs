@@ -1,12 +1,12 @@
-//! Validation module - Contains BOTTLENECK #2 (Memory)
+//! Validation module with expensive debug tracing (bounded leak).
 
-use crate::app::Request;
+use crate::model::Request;
 use crate::utils;
 
 pub struct InputValidator {
-    // Looks like a simple validator...
     rules: Vec<ValidationRule>,
-    history: Vec<ValidationRecord>,
+    recent: Vec<ValidationRecord>,
+    leak_guard: usize,
 }
 
 struct ValidationRule {
@@ -15,12 +15,10 @@ struct ValidationRule {
     max_len: usize,
 }
 
-#[allow(dead_code)] // Fields are intentionally unused - it's a memory leak!
+#[allow(dead_code)] // Captured for troubleshooting; not used in the hot path.
 struct ValidationRecord {
     key: String,
     passed: bool,
-    timestamp: u64,
-    // BOTTLENECK #2: Storing way too much data per validation
     debug_info: String,
 }
 
@@ -29,35 +27,34 @@ impl InputValidator {
         Self {
             rules: vec![
                 ValidationRule {
-                    name: "length".into(),
-                    min_len: 1,
-                    max_len: 1000,
+                    name: "key".into(),
+                    min_len: 2,
+                    max_len: 128,
                 },
                 ValidationRule {
                     name: "payload".into(),
-                    min_len: 0,
-                    max_len: 10000,
+                    min_len: 32,
+                    max_len: 4096,
                 },
             ],
-            history: Vec::new(),
+            recent: Vec::new(),
+            leak_guard: 0,
         }
     }
 
     #[inline(never)]
-    pub fn validate(&mut self, request: &Request) -> bool {
-        let passed = self.check_rules(request);
-
-        // Record validation - this is the memory leak!
-        self.record_validation(request, passed);
-
+    pub fn validate(&mut self, request: &Request, headers: &[(String, String)]) -> bool {
+        let passed = self.check_rules(request, headers);
+        self.record_validation(request, headers, passed);
         passed
     }
 
     #[inline(never)]
-    fn check_rules(&self, request: &Request) -> bool {
+    fn check_rules(&self, request: &Request, headers: &[(String, String)]) -> bool {
+        let header_len = headers.len();
         for rule in &self.rules {
             let len = match rule.name.as_str() {
-                "length" => request.key.len(),
+                "key" => request.key.len() + header_len,
                 "payload" => request.payload.len(),
                 _ => 0,
             };
@@ -69,47 +66,42 @@ impl InputValidator {
     }
 
     #[inline(never)]
-    fn record_validation(&mut self, request: &Request, passed: bool) {
-        // BOTTLENECK #2: Accumulating history forever with bloated records
+    fn record_validation(&mut self, request: &Request, headers: &[(String, String)], passed: bool) {
         let record = ValidationRecord {
             key: request.key.clone(),
             passed,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            // This generates a huge string every time!
-            debug_info: self.generate_debug_info(request),
+            debug_info: self.generate_debug_info(request, headers),
         };
-        self.history.push(record);
+        self.recent.push(record);
+        self.leak_guard += 1;
 
-        // "Cleanup" that doesn't actually help much
-        if self.history.len() > 10000 {
-            self.history.drain(0..1000);
+        if self.recent.len() > 4000 {
+            let drain_count = 1200;
+            self.recent.drain(0..drain_count);
+        }
+
+        if self.leak_guard >= 2500 {
+            self.recent.shrink_to(3000);
+            self.leak_guard = 0;
         }
     }
 
     #[inline(never)]
-    fn generate_debug_info(&self, request: &Request) -> String {
-        // Creates a large string for every single validation
-        // Uses utils functions for extra overhead
-        let trace_id = utils::generate_trace_id();
+    fn generate_debug_info(&self, request: &Request, headers: &[(String, String)]) -> String {
+        let trace_id = utils::generate_trace_id(request.id);
         let sanitized_key = utils::sanitize_for_log(&request.key);
         let size_str = utils::format_bytes(request.payload.len());
+        let header_keys: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
 
         format!(
-            "[{}] Validated request '{}' with {} payload. \
-             Rules checked: {:?}. Priority level: {}. \
-             Current history size: {}. Timestamp: {:?}. \
-             Payload preview: {:?}",
+            "[{}] key={} size={} headers={:?} route={:?} flags={} payload_preview={:?}",
             trace_id,
             sanitized_key,
             size_str,
-            self.rules.iter().map(|r| &r.name).collect::<Vec<_>>(),
-            request.priority,
-            self.history.len(),
-            std::time::SystemTime::now(),
-            &request.payload[..request.payload.len().min(32)],
+            header_keys,
+            request.route,
+            request.flags,
+            &request.payload[..request.payload.len().min(24)],
         )
     }
 }

@@ -1,23 +1,23 @@
-//! Main application logic
+//! Main application logic.
 
-use crate::audit_log;
+use crate::analytics::AnalyticsEngine;
+use crate::audit::AuditLog;
 use crate::cache::DataCache;
-use crate::metrics;
-use crate::processing::RequestProcessor;
+use crate::checkout::CheckoutEngine;
+use crate::model::{Request, Response, Route, Stats};
+use crate::search::SearchEngine;
+use crate::utils;
 use crate::validation::InputValidator;
-
-pub struct Stats {
-    pub cache_hits: u64,
-    pub cache_misses: u64,
-    pub errors: u64,
-}
 
 pub struct Application {
     tick: u64,
     stats: Stats,
     cache: DataCache,
-    processor: RequestProcessor,
     validator: InputValidator,
+    search: SearchEngine,
+    checkout: CheckoutEngine,
+    analytics: AnalyticsEngine,
+    audit: AuditLog,
 }
 
 impl Application {
@@ -25,13 +25,17 @@ impl Application {
         Self {
             tick: 0,
             stats: Stats {
+                requests: 0,
                 cache_hits: 0,
                 cache_misses: 0,
                 errors: 0,
             },
             cache: DataCache::new(),
-            processor: RequestProcessor::new(),
             validator: InputValidator::new(),
+            search: SearchEngine::new(),
+            checkout: CheckoutEngine::new(),
+            analytics: AnalyticsEngine::new(),
+            audit: AuditLog::new(),
         }
     }
 
@@ -46,53 +50,71 @@ impl Application {
     #[inline(never)]
     pub fn tick(&mut self) {
         self.tick += 1;
+        self.stats.requests += 1;
 
-        // Simulate incoming requests
         let request = self.generate_request();
+        let headers = utils::parse_headers(&request.payload);
 
-        // Validate input
-        if !self.validator.validate(&request) {
+        if !self.validator.validate(&request, &headers) {
             self.stats.errors += 1;
             return;
         }
 
-        // Log audit event (MEMORY LEAK!)
-        audit_log::log_audit_event("process", &request.key, &request.payload);
-
-        // Check cache first
-        if let Some(_cached) = self.cache.get(&request.key) {
+        if let Some(cached) = self.cache.get(&request.key) {
             self.stats.cache_hits += 1;
+            let _ = cached.len();
             return;
         }
         self.stats.cache_misses += 1;
 
-        // Process the request
-        let result = self.processor.process(&request);
+        let response = self.handle_request(&request, &headers);
 
-        // Store in cache
-        self.cache.put(request.key.clone(), result);
+        if response.cacheable {
+            self.cache.put(request.key.clone(), response.body.clone());
+        }
+
+        self.audit.record_event(&request, &response);
+    }
+
+    #[inline(never)]
+    fn handle_request(&mut self, request: &Request, headers: &[(String, String)]) -> Response {
+        match request.route {
+            Route::Search => self.search.handle(request, headers),
+            Route::Checkout => self.checkout.handle(request, headers),
+            Route::Analytics => self.analytics.handle(request, headers),
+            Route::Health => Response {
+                status: 200,
+                body: b"ok".to_vec(),
+                cacheable: true,
+            },
+        }
     }
 
     #[inline(never)]
     fn generate_request(&self) -> Request {
+        // Mix routes so multiple hotspots show up (search is still hottest, but not dominant).
+        let route = match self.tick % 20 {
+            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => Route::Search,
+            9 | 10 | 11 | 12 | 13 => Route::Checkout,
+            14 | 15 | 16 => Route::Analytics,
+            _ => Route::Health,
+        };
+
+        let user_id = (self.tick % 512) + 1;
+        let session_id = (self.tick % 2048) + 10;
+        let key = format!("r{}_{}", user_id, self.tick % 200);
+
+        let mut payload = vec![0u8; 96 + (self.tick % 128) as usize];
+        utils::fill_payload(&mut payload, self.tick as u64);
+
         Request {
-            key: format!("req_{}", self.tick % 150),
-            payload: vec![0u8; 64 + (self.tick % 64) as usize],
-            priority: (self.tick % 3) as u8,
+            id: self.tick,
+            user_id,
+            session_id,
+            key,
+            payload,
+            route,
+            flags: (self.tick % 4) as u8,
         }
-    }
-}
-
-pub struct Request {
-    pub key: String,
-    pub payload: Vec<u8>,
-    pub priority: u8,
-}
-
-// Sneaky: Hook into Drop to call metrics
-impl Drop for Request {
-    fn drop(&mut self) {
-        // This causes metrics::record_alloc_size to be called frequently
-        metrics::record_alloc_size(self.payload.len());
     }
 }

@@ -1,16 +1,18 @@
-//! More realistic CTF target with divergent/convergent paths and bounded leaks.
+//! CTF-style target application for testing rsprof
 //!
-//! Build: cargo build --release --example ctf_app -p rsprof
-//! Run:   ./target/release/examples/ctf_app
-//! Profile: rsprof -p $(pgrep ctf_app)
+//! This app has hidden performance bottlenecks. Can you find them?
+//!
+//! Build: cargo build --release --example target_app -p rsprof
+//! Run:   ./target/release/examples/target_app
+//! Profile: rsprof -p $(pgrep target_app)
+//!
+//! CHALLENGE: Find the 3 major optimization targets!
 
-mod analytics;
 mod app;
-mod audit;
+mod audit_log;
 mod cache;
-mod checkout;
-mod model;
-mod search;
+mod metrics;
+mod processing;
 mod utils;
 mod validation;
 
@@ -20,11 +22,11 @@ use std::time::{Duration, Instant};
 rsprof_trace::profiler!();
 
 fn main() {
-    println!("=== Performance CTF (Realistic) ===");
+    println!("=== Performance CTF ===");
     println!("PID: {}", std::process::id());
     println!();
-    println!("Multiple hot/cold paths with bounded leaks.");
-    println!("Find the top CPU and heap targets.");
+    println!("This app has hidden performance bottlenecks.");
+    println!("Use rsprof to find the 3 major optimization targets!");
     println!();
     println!("Press Ctrl-C to stop.");
     println!();
@@ -36,13 +38,12 @@ fn main() {
         application.tick();
 
         if application.tick_count().is_multiple_of(500) {
-            let stats = application.stats();
             println!(
                 "[{:>5.1}s] processed={:<6} cache_hits={:<5} errors={:<3}",
                 start.elapsed().as_secs_f64(),
-                stats.requests,
-                stats.cache_hits,
-                stats.errors,
+                application.tick_count(),
+                application.stats().cache_hits,
+                application.stats().errors,
             );
         }
 

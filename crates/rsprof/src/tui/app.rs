@@ -247,6 +247,37 @@ pub enum ChartType {
     Bar,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortColumn {
+    Total,
+    Live,
+    Function,
+    Location,
+    Trend,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TableSort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+impl TableSort {
+    fn default_cpu() -> Self {
+        TableSort {
+            column: SortColumn::Total,
+            descending: true,
+        }
+    }
+
+    fn default_heap() -> Self {
+        TableSort {
+            column: SortColumn::Total,
+            descending: true,
+        }
+    }
+}
+
 /// View mode for switching between CPU and Memory views
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum ViewMode {
@@ -443,6 +474,8 @@ pub struct App {
     selected_location_id: Option<i64>,
     selected_heap_location_id: Option<i64>,
     selected_func_name: Option<String>,
+    cpu_sort: TableSort,
+    heap_sort: TableSort,
     func_history: Vec<(f64, f64)>,
     last_history_tick: Instant,
     cached_entries: Vec<CpuEntry>,
@@ -498,6 +531,8 @@ impl App {
             selected_location_id: None,
             selected_heap_location_id: None,
             selected_func_name: None,
+            cpu_sort: TableSort::default_cpu(),
+            heap_sort: TableSort::default_heap(),
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
             cached_entries: Vec::new(),
@@ -573,6 +608,8 @@ impl App {
             selected_location_id: None,
             selected_heap_location_id: None,
             selected_func_name: None,
+            cpu_sort: TableSort::default_cpu(),
+            heap_sort: TableSort::default_heap(),
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
             cached_entries: entries,
@@ -590,6 +627,8 @@ impl App {
             view_mode: ViewMode::default(),
             chart_visible: false, // Hidden by default
         };
+
+        app.sort_all_entries();
 
         // Load initial timeseries for first entry
         if !app.cached_entries.is_empty() {
@@ -1106,6 +1145,10 @@ impl App {
             && y < self.table_area.y + self.table_area.height
         {
             self.focus = Focus::Table;
+            if y == self.table_area.y + 1 {
+                self.handle_table_header_click(x);
+                return;
+            }
 
             // Calculate row index from click position
             // Table has: border (1) + header (1) = 2 rows before data
@@ -1173,6 +1216,13 @@ impl App {
 
     pub fn selected_func(&self) -> Option<&str> {
         self.selected_func_name.as_deref()
+    }
+
+    pub fn active_sort(&self) -> TableSort {
+        match self.view_mode {
+            ViewMode::Cpu => self.cpu_sort,
+            ViewMode::Memory => self.heap_sort,
+        }
     }
 
     /// Set the table area for mouse click detection
@@ -1292,6 +1342,167 @@ impl App {
         if let Some(storage) = &self.storage {
             self.cached_entries = storage.query_top_cpu_live(100);
             self.cached_heap_entries = storage.query_top_heap_live(100);
+        }
+        self.sort_all_entries();
+    }
+
+    fn sort_all_entries(&mut self) {
+        self.sort_cpu_entries();
+        self.sort_heap_entries();
+    }
+
+    fn sort_cpu_entries(&mut self) {
+        let sort = self.cpu_sort;
+        self.cached_entries.sort_by(|a, b| {
+            let ordering = match sort.column {
+                SortColumn::Total => cmp_f64(a.total_percent, b.total_percent),
+                SortColumn::Live | SortColumn::Trend => cmp_f64(a.instant_percent, b.instant_percent),
+                SortColumn::Function => a.function.cmp(&b.function),
+                SortColumn::Location => a.file.cmp(&b.file).then(a.line.cmp(&b.line)),
+            };
+            let ordering = if sort.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            ordering.then(a.location_id.cmp(&b.location_id))
+        });
+    }
+
+    fn sort_heap_entries(&mut self) {
+        let sort = self.heap_sort;
+        self.cached_heap_entries.sort_by(|a, b| {
+            let ordering = match sort.column {
+                SortColumn::Total => a.total_alloc_bytes.cmp(&b.total_alloc_bytes),
+                SortColumn::Live | SortColumn::Trend => a.live_bytes.cmp(&b.live_bytes),
+                SortColumn::Function => a.function.cmp(&b.function),
+                SortColumn::Location => a.file.cmp(&b.file).then(a.line.cmp(&b.line)),
+            };
+            let ordering = if sort.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            ordering.then(a.location_id.cmp(&b.location_id))
+        });
+    }
+
+    fn toggle_sort(&mut self, column: SortColumn) {
+        self.ensure_selection_anchor();
+
+        let sort = match self.view_mode {
+            ViewMode::Cpu => &mut self.cpu_sort,
+            ViewMode::Memory => &mut self.heap_sort,
+        };
+
+        if sort.column == column {
+            sort.descending = !sort.descending;
+        } else {
+            sort.column = column;
+            sort.descending = match column {
+                SortColumn::Function | SortColumn::Location => false,
+                SortColumn::Total | SortColumn::Live | SortColumn::Trend => true,
+            };
+        }
+
+        match self.view_mode {
+            ViewMode::Cpu => self.sort_cpu_entries(),
+            ViewMode::Memory => self.sort_heap_entries(),
+        }
+
+        self.reselect_anchor();
+        self.ensure_selection_visible();
+    }
+
+    fn ensure_selection_anchor(&mut self) {
+        match self.view_mode {
+            ViewMode::Cpu => {
+                if self.selected_location_id.is_none() {
+                    if let Some(entry) = self.cached_entries.get(self.selected_row) {
+                        self.selected_location_id = Some(entry.location_id);
+                    }
+                }
+            }
+            ViewMode::Memory => {
+                if self.selected_heap_location_id.is_none() {
+                    if let Some(entry) = self.cached_heap_entries.get(self.selected_row) {
+                        self.selected_heap_location_id = Some(entry.location_id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn reselect_anchor(&mut self) {
+        match self.view_mode {
+            ViewMode::Cpu => {
+                if let Some(loc_id) = self.selected_location_id {
+                    if let Some(idx) = self
+                        .cached_entries
+                        .iter()
+                        .position(|e| e.location_id == loc_id)
+                    {
+                        self.selected_row = idx;
+                    }
+                }
+            }
+            ViewMode::Memory => {
+                if let Some(loc_id) = self.selected_heap_location_id {
+                    if let Some(idx) = self
+                        .cached_heap_entries
+                        .iter()
+                        .position(|e| e.location_id == loc_id)
+                    {
+                        self.selected_row = idx;
+                    }
+                }
+            }
+        }
+    }
+
+    fn table_column_at(&self, x: u16) -> Option<SortColumn> {
+        let inner_width = self.table_area.width.saturating_sub(2);
+        if inner_width == 0 {
+            return None;
+        }
+        let inner_x = self.table_area.x.saturating_add(1);
+        if x < inner_x || x >= inner_x + inner_width {
+            return None;
+        }
+
+        let fixed_width = 8 + 8 + 14;
+        let remaining = inner_width.saturating_sub(fixed_width);
+        let func_width = remaining / 2;
+        let loc_width = remaining - func_width;
+
+        let mut offset = 0u16;
+        let pos = x.saturating_sub(inner_x);
+
+        if pos < offset + 8 {
+            return Some(SortColumn::Total);
+        }
+        offset += 8;
+        if pos < offset + 8 {
+            return Some(SortColumn::Live);
+        }
+        offset += 8;
+        if pos < offset + func_width {
+            return Some(SortColumn::Function);
+        }
+        offset += func_width;
+        if pos < offset + loc_width {
+            return Some(SortColumn::Location);
+        }
+        offset += loc_width;
+        if pos < offset + 14 {
+            return Some(SortColumn::Trend);
+        }
+        None
+    }
+
+    fn handle_table_header_click(&mut self, x: u16) {
+        if let Some(column) = self.table_column_at(x) {
+            self.toggle_sort(column);
         }
     }
 
@@ -1485,4 +1696,8 @@ impl App {
 
         &self.heap_chart_cache.data
     }
+}
+
+fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }

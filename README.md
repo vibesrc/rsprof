@@ -2,6 +2,12 @@
 
 A zero-instrumentation profiler for Rust applications with real-time CPU and heap analysis.
 
+## Screenshots
+
+| CPU | Heap |
+| --- | --- |
+| ![CPU view](docs/media/cpu.png) | ![Heap view](docs/media/heap.png) |
+
 ## Features
 
 - **CPU profiling** - Timer-based sampling via perf events or self-instrumentation

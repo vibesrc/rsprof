@@ -1,4 +1,4 @@
-use super::app::{App, ChartType, Focus, ViewMode};
+use super::app::{App, ChartType, Focus, SortColumn, TableSort, ViewMode};
 use crate::storage::{CpuEntry, HeapEntry};
 use ratatui::{
     Frame,
@@ -98,6 +98,7 @@ fn render_unified_table(
     selected: usize,
     scroll_offset: usize,
     focus: Focus,
+    sort: TableSort,
     area: Rect,
 ) {
     let border_color = if focus == Focus::Table {
@@ -124,15 +125,20 @@ fn render_unified_table(
         return;
     }
 
-    let header_cells = ["Total", "Live", "Function", "Location", "Trend"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_labels = [
+        header_label("Total", SortColumn::Total, sort),
+        header_label("Live", SortColumn::Live, sort),
+        header_label("Function", SortColumn::Function, sort),
+        header_label("Location", SortColumn::Location, sort),
+        header_label("Trend", SortColumn::Trend, sort),
+    ];
+    let header_cells = header_labels.iter().map(|h| {
+        Cell::from(h.as_str()).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1);
 
     let visible_height = area.height.saturating_sub(3) as usize;
@@ -205,6 +211,14 @@ fn render_unified_table(
         };
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
+}
+
+fn header_label(label: &str, column: SortColumn, sort: TableSort) -> String {
+    if sort.column != column {
+        return label.to_string();
+    }
+    let indicator = if sort.descending { "v" } else { "^" };
+    format!("{} {}", label, indicator)
 }
 
 /// Render sparkline from data points with per-character coloring
@@ -415,6 +429,7 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected = app.selected_row();
     let scroll_offset = app.scroll_offset();
     let focus = app.focus;
+    let sort = app.active_sort();
 
     // Prepare table data based on view mode (use appropriate sparklines)
     let (title, rows) = match view_mode {
@@ -442,15 +457,7 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.set_chart_area(chunks[1]);
 
         // Render unified table
-        render_unified_table(
-            frame,
-            title,
-            &rows,
-            selected,
-            scroll_offset,
-            focus,
-            chunks[0],
-        );
+        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, sort, chunks[0]);
 
         // Render appropriate chart
         match view_mode {
@@ -462,8 +469,8 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.set_table_area(area);
         app.set_chart_area(Rect::default());
 
-        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, area);
-    }
+        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, sort, area);
+}
 }
 
 fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: Rect) {

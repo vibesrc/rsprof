@@ -25,7 +25,7 @@ impl SearchEngine {
         Response {
             status: 200,
             body: response_body,
-            cacheable: request.flags % 2 == 0,
+            cacheable: request.flags.is_multiple_of(2),
         }
     }
 

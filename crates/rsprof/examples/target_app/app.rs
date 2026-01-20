@@ -94,9 +94,9 @@ impl Application {
     fn generate_request(&self) -> Request {
         // Mix routes so multiple hotspots show up (search is still hottest, but not dominant).
         let route = match self.tick % 20 {
-            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => Route::Search,
-            9 | 10 | 11 | 12 | 13 => Route::Checkout,
-            14 | 15 | 16 => Route::Analytics,
+            0..=8 => Route::Search,
+            9..=13 => Route::Checkout,
+            14..=16 => Route::Analytics,
             _ => Route::Health,
         };
 
@@ -105,7 +105,7 @@ impl Application {
         let key = format!("r{}_{}", user_id, self.tick % 200);
 
         let mut payload = vec![0u8; 96 + (self.tick % 128) as usize];
-        utils::fill_payload(&mut payload, self.tick as u64);
+        utils::fill_payload(&mut payload, self.tick);
 
         Request {
             id: self.tick,

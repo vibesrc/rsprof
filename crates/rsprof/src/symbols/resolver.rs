@@ -234,16 +234,13 @@ fn detect_target_root(dwarf: &DwarfInfo, exe_path: &Path) -> Option<PathBuf> {
 }
 
 fn root_from_main_decl(dwarf: &DwarfInfo) -> Option<PathBuf> {
-    let main_decl = dwarf
-        .function_decls
-        .iter()
-        .find_map(|(name, (file, _))| {
-            if name == "main" || name.ends_with("::main") {
-                Some(file.as_str())
-            } else {
-                None
-            }
-        })?;
+    let main_decl = dwarf.function_decls.iter().find_map(|(name, (file, _))| {
+        if name == "main" || name.ends_with("::main") {
+            Some(file.as_str())
+        } else {
+            None
+        }
+    })?;
     root_from_source_path(main_decl)
 }
 

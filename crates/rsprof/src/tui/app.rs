@@ -920,9 +920,8 @@ impl App {
                         self.scroll_offset = self.scroll_offset.min(max_scroll);
 
                         if self.selected_heap_location_id.is_none() {
-                            self.selected_heap_location_id = Some(
-                                self.cached_heap_entries[self.selected_row].location_id,
-                            );
+                            self.selected_heap_location_id =
+                                Some(self.cached_heap_entries[self.selected_row].location_id);
                             self.heap_chart_cache.location_id = None;
                         }
                     }
@@ -1356,7 +1355,9 @@ impl App {
         self.cached_entries.sort_by(|a, b| {
             let ordering = match sort.column {
                 SortColumn::Total => cmp_f64(a.total_percent, b.total_percent),
-                SortColumn::Live | SortColumn::Trend => cmp_f64(a.instant_percent, b.instant_percent),
+                SortColumn::Live | SortColumn::Trend => {
+                    cmp_f64(a.instant_percent, b.instant_percent)
+                }
                 SortColumn::Function => a.function.cmp(&b.function),
                 SortColumn::Location => a.file.cmp(&b.file).then(a.line.cmp(&b.line)),
             };
@@ -1417,17 +1418,17 @@ impl App {
     fn ensure_selection_anchor(&mut self) {
         match self.view_mode {
             ViewMode::Cpu => {
-                if self.selected_location_id.is_none() {
-                    if let Some(entry) = self.cached_entries.get(self.selected_row) {
-                        self.selected_location_id = Some(entry.location_id);
-                    }
+                if self.selected_location_id.is_none()
+                    && let Some(entry) = self.cached_entries.get(self.selected_row)
+                {
+                    self.selected_location_id = Some(entry.location_id);
                 }
             }
             ViewMode::Memory => {
-                if self.selected_heap_location_id.is_none() {
-                    if let Some(entry) = self.cached_heap_entries.get(self.selected_row) {
-                        self.selected_heap_location_id = Some(entry.location_id);
-                    }
+                if self.selected_heap_location_id.is_none()
+                    && let Some(entry) = self.cached_heap_entries.get(self.selected_row)
+                {
+                    self.selected_heap_location_id = Some(entry.location_id);
                 }
             }
         }
@@ -1436,25 +1437,23 @@ impl App {
     fn reselect_anchor(&mut self) {
         match self.view_mode {
             ViewMode::Cpu => {
-                if let Some(loc_id) = self.selected_location_id {
-                    if let Some(idx) = self
+                if let Some(loc_id) = self.selected_location_id
+                    && let Some(idx) = self
                         .cached_entries
                         .iter()
                         .position(|e| e.location_id == loc_id)
-                    {
-                        self.selected_row = idx;
-                    }
+                {
+                    self.selected_row = idx;
                 }
             }
             ViewMode::Memory => {
-                if let Some(loc_id) = self.selected_heap_location_id {
-                    if let Some(idx) = self
+                if let Some(loc_id) = self.selected_heap_location_id
+                    && let Some(idx) = self
                         .cached_heap_entries
                         .iter()
                         .position(|e| e.location_id == loc_id)
-                    {
-                        self.selected_row = idx;
-                    }
+                {
+                    self.selected_row = idx;
                 }
             }
         }

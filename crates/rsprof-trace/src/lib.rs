@@ -174,7 +174,11 @@ mod enabled {
             if layout.align() > MIN_ALIGN {
                 let new_ptr = unsafe { aligned_malloc(new_size, layout.align()) };
                 if !new_ptr.is_null() {
-                    let copy_size = if new_size < layout.size() { new_size } else { layout.size() };
+                    let copy_size = if new_size < layout.size() {
+                        new_size
+                    } else {
+                        layout.size()
+                    };
                     unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_size) };
                     record_dealloc(ptr, layout.size());
                     unsafe { libc::free(ptr as *mut libc::c_void) };
@@ -183,7 +187,8 @@ mod enabled {
                 new_ptr
             } else {
                 record_dealloc(ptr, layout.size());
-                let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
+                let new_ptr =
+                    unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
                 if !new_ptr.is_null() {
                     record_alloc(new_ptr, new_size);
                 }

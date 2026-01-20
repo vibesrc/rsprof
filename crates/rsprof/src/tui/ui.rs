@@ -90,18 +90,22 @@ fn heap_to_table_rows(
         .collect()
 }
 
-/// Render a unified table with the standard layout
-fn render_unified_table(
-    frame: &mut Frame,
-    title: &str,
-    rows: &[TableRow],
+struct TableRenderState {
     selected: usize,
     scroll_offset: usize,
     focus: Focus,
     sort: TableSort,
     area: Rect,
+}
+
+/// Render a unified table with the standard layout
+fn render_unified_table(
+    frame: &mut Frame,
+    title: &str,
+    rows: &[TableRow],
+    state: TableRenderState,
 ) {
-    let border_color = if focus == Focus::Table {
+    let border_color = if state.focus == Focus::Table {
         Color::Cyan
     } else {
         Color::DarkGray
@@ -121,16 +125,16 @@ fn render_unified_table(
             )),
         ];
         let paragraph = Paragraph::new(text).block(block);
-        frame.render_widget(paragraph, area);
+        frame.render_widget(paragraph, state.area);
         return;
     }
 
     let header_labels = [
-        header_label("Total", SortColumn::Total, sort),
-        header_label("Live", SortColumn::Live, sort),
-        header_label("Function", SortColumn::Function, sort),
-        header_label("Location", SortColumn::Location, sort),
-        header_label("Trend", SortColumn::Trend, sort),
+        header_label("Total", SortColumn::Total, state.sort),
+        header_label("Live", SortColumn::Live, state.sort),
+        header_label("Function", SortColumn::Function, state.sort),
+        header_label("Location", SortColumn::Location, state.sort),
+        header_label("Trend", SortColumn::Trend, state.sort),
     ];
     let header_cells = header_labels.iter().map(|h| {
         Cell::from(h.as_str()).style(
@@ -141,10 +145,10 @@ fn render_unified_table(
     });
     let header = Row::new(header_cells).height(1);
 
-    let visible_height = area.height.saturating_sub(3) as usize;
+    let visible_height = state.area.height.saturating_sub(3) as usize;
     let max_scroll = rows.len().saturating_sub(visible_height.max(1));
-    let scroll_offset = scroll_offset.min(max_scroll);
-    let selected = selected.min(rows.len().saturating_sub(1));
+    let scroll_offset = state.scroll_offset.min(max_scroll);
+    let selected = state.selected.min(rows.len().saturating_sub(1));
 
     // Find global max for sparkline heatmap coloring
     let global_max = rows
@@ -191,7 +195,7 @@ fn render_unified_table(
 
     let table = Table::new(table_rows, widths).header(header).block(block);
 
-    frame.render_widget(table, area);
+    frame.render_widget(table, state.area);
 
     // Render scrollbar if there are more entries than visible
     if rows.len() > visible_height {
@@ -204,10 +208,10 @@ fn render_unified_table(
         let mut scrollbar_state = ScrollbarState::new(rows.len()).position(scroll_offset);
 
         let scrollbar_area = Rect {
-            x: area.x + area.width - 1,
-            y: area.y + 1,
+            x: state.area.x + state.area.width - 1,
+            y: state.area.y + 1,
             width: 1,
-            height: area.height.saturating_sub(2),
+            height: state.area.height.saturating_sub(2),
         };
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
@@ -457,7 +461,18 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.set_chart_area(chunks[1]);
 
         // Render unified table
-        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, sort, chunks[0]);
+        render_unified_table(
+            frame,
+            title,
+            &rows,
+            TableRenderState {
+                selected,
+                scroll_offset,
+                focus,
+                sort,
+                area: chunks[0],
+            },
+        );
 
         // Render appropriate chart
         match view_mode {
@@ -469,8 +484,19 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         app.set_table_area(area);
         app.set_chart_area(Rect::default());
 
-        render_unified_table(frame, title, &rows, selected, scroll_offset, focus, sort, area);
-}
+        render_unified_table(
+            frame,
+            title,
+            &rows,
+            TableRenderState {
+                selected,
+                scroll_offset,
+                focus,
+                sort,
+                area,
+            },
+        );
+    }
 }
 
 fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: Rect) {

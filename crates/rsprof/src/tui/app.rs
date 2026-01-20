@@ -813,13 +813,8 @@ impl App {
                 }
             }
 
-            // Update entries and selection (live mode queries DB each frame)
-            if !self.is_static()
-                && let Some(storage) = &self.storage
-            {
-                self.cached_entries = storage.query_top_cpu_live(100);
-                self.cached_heap_entries = storage.query_top_heap_live(100);
-                // Update chart total duration
+            // Update chart duration each frame for smooth zoom bounds
+            if !self.is_static() {
                 self.chart_state.total_duration_secs = self.start_time.elapsed().as_secs_f64();
             }
 
@@ -1239,10 +1234,7 @@ impl App {
         const SPARKLINE_WIDTH: usize = 12;
 
         // Refresh entries from DB
-        if let Some(storage) = &self.storage {
-            self.cached_entries = storage.query_top_cpu_live(100);
-            self.cached_heap_entries = storage.query_top_heap_live(100);
-        }
+        self.refresh_entries();
 
         // Update CPU sparklines
         let cpu_current: HashMap<i64, i64> = self
@@ -1294,6 +1286,13 @@ impl App {
 
         // New heap data arrived; force chart cache refresh for live updates.
         self.heap_chart_cache.location_id = None;
+    }
+
+    fn refresh_entries(&mut self) {
+        if let Some(storage) = &self.storage {
+            self.cached_entries = storage.query_top_cpu_live(100);
+            self.cached_heap_entries = storage.query_top_heap_live(100);
+        }
     }
 
     /// Query chart data with DB-level aggregation and caching

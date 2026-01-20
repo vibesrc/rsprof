@@ -127,13 +127,34 @@ mod enabled {
         }
     }
 
+    // Minimum alignment guaranteed by malloc (typically 8 on 32-bit, 16 on 64-bit)
+    const MIN_ALIGN: usize = core::mem::size_of::<usize>() * 2;
+
+    /// Allocate with proper alignment using posix_memalign when needed
+    #[inline(never)]
+    unsafe fn aligned_malloc(size: usize, align: usize) -> *mut u8 {
+        if align <= MIN_ALIGN {
+            // malloc provides sufficient alignment
+            unsafe { libc::malloc(size) as *mut u8 }
+        } else {
+            // Need explicit alignment
+            let mut ptr: *mut libc::c_void = core::ptr::null_mut();
+            let ret = unsafe { libc::posix_memalign(&mut ptr, align, size) };
+            if ret == 0 {
+                ptr as *mut u8
+            } else {
+                core::ptr::null_mut()
+            }
+        }
+    }
+
     unsafe impl<const CPU_FREQ: u32> GlobalAlloc for ProfilingAllocator<CPU_FREQ> {
         // IMPORTANT: These must NOT be inlined!
         // If inlined into libstd (which has no frame pointers), stack capture breaks.
         #[inline(never)]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             maybe_init_cpu::<CPU_FREQ>();
-            let ptr = unsafe { libc::malloc(layout.size()) as *mut u8 };
+            let ptr = unsafe { aligned_malloc(layout.size(), layout.align()) };
             if !ptr.is_null() {
                 record_alloc(ptr, layout.size());
             }
@@ -148,22 +169,46 @@ mod enabled {
 
         #[inline(never)]
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            record_dealloc(ptr, layout.size());
-            let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
-            if !new_ptr.is_null() {
-                record_alloc(new_ptr, new_size);
+            // realloc doesn't preserve alignment, so we need to alloc+copy+free
+            // for over-aligned types
+            if layout.align() > MIN_ALIGN {
+                let new_ptr = unsafe { aligned_malloc(new_size, layout.align()) };
+                if !new_ptr.is_null() {
+                    let copy_size = if new_size < layout.size() { new_size } else { layout.size() };
+                    unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_size) };
+                    record_dealloc(ptr, layout.size());
+                    unsafe { libc::free(ptr as *mut libc::c_void) };
+                    record_alloc(new_ptr, new_size);
+                }
+                new_ptr
+            } else {
+                record_dealloc(ptr, layout.size());
+                let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 };
+                if !new_ptr.is_null() {
+                    record_alloc(new_ptr, new_size);
+                }
+                new_ptr
             }
-            new_ptr
         }
 
         #[inline(never)]
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             maybe_init_cpu::<CPU_FREQ>();
-            let ptr = unsafe { libc::calloc(1, layout.size()) as *mut u8 };
-            if !ptr.is_null() {
-                record_alloc(ptr, layout.size());
+            if layout.align() <= MIN_ALIGN {
+                let ptr = unsafe { libc::calloc(1, layout.size()) as *mut u8 };
+                if !ptr.is_null() {
+                    record_alloc(ptr, layout.size());
+                }
+                ptr
+            } else {
+                // calloc doesn't support alignment, use aligned_malloc + memset
+                let ptr = unsafe { aligned_malloc(layout.size(), layout.align()) };
+                if !ptr.is_null() {
+                    unsafe { core::ptr::write_bytes(ptr, 0, layout.size()) };
+                    record_alloc(ptr, layout.size());
+                }
+                ptr
             }
-            ptr
         }
     }
 }

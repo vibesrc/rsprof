@@ -2,6 +2,7 @@ use super::dwarf::{AddressRange, DwarfInfo};
 use crate::error::Result;
 use crate::process::{MemoryMaps, ProcessInfo};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// A resolved source location
 #[derive(Debug, Clone, Default)]
@@ -49,6 +50,8 @@ pub struct SymbolResolver {
     aslr_offset: u64,
     /// LRU cache for recent lookups
     cache: HashMap<u64, Location>,
+    /// Root directory for the target app's source (used to filter dependencies)
+    target_root: Option<PathBuf>,
 }
 
 impl SymbolResolver {
@@ -57,6 +60,7 @@ impl SymbolResolver {
         // Parse DWARF info from executable
         // Use proc_exe_path which works even if binary was deleted/rebuilt
         let dwarf = DwarfInfo::parse(proc_info.proc_exe_path())?;
+        let target_root = detect_target_root(&dwarf, proc_info.exe_path());
 
         // Get ASLR offset from memory maps
         let maps = MemoryMaps::for_pid(proc_info.pid())?;
@@ -68,6 +72,7 @@ impl SymbolResolver {
             function_decls: dwarf.function_decls,
             aslr_offset,
             cache: HashMap::new(),
+            target_root,
         })
     }
 
@@ -116,6 +121,9 @@ impl SymbolResolver {
                     && !is_stdlib_function(&function)
                     && let Some((decl_file, decl_line)) = self.function_decls.get(&function)
                 {
+                    if !self.is_target_path(decl_file) {
+                        return Location::unknown();
+                    }
                     let simplified_decl = simplify_path(decl_file);
                     // Only use decl location if it's a user file
                     if !is_stdlib_path(&simplified_decl) {
@@ -126,6 +134,10 @@ impl SymbolResolver {
                             function,
                         };
                     }
+                }
+
+                if !self.is_target_path(&range.file) {
+                    return Location::unknown();
                 }
 
                 Location {
@@ -139,6 +151,9 @@ impl SymbolResolver {
                 // No line info, try to use function declaration if available
                 if function != "[unknown]" {
                     if let Some((decl_file, decl_line)) = self.function_decls.get(&function) {
+                        if !self.is_target_path(decl_file) {
+                            return Location::unknown();
+                        }
                         let simplified = simplify_path(decl_file);
                         if !is_stdlib_path(&simplified) {
                             return Location {
@@ -194,6 +209,81 @@ impl SymbolResolver {
         best.map(|(_, name)| name.clone())
             .unwrap_or_else(|| "[unknown]".to_string())
     }
+
+    fn is_target_path(&self, path: &str) -> bool {
+        let Some(root) = &self.target_root else {
+            return true;
+        };
+        if path.is_empty() {
+            return false;
+        }
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            return candidate.starts_with(root);
+        }
+        // Best-effort: treat relative paths as in-target only if they exist under root.
+        root.join(candidate).exists()
+    }
+}
+
+fn detect_target_root(dwarf: &DwarfInfo, exe_path: &Path) -> Option<PathBuf> {
+    if let Some(root) = root_from_main_decl(dwarf) {
+        return Some(root);
+    }
+    cargo_root_from_exe(exe_path)
+}
+
+fn root_from_main_decl(dwarf: &DwarfInfo) -> Option<PathBuf> {
+    let main_decl = dwarf
+        .function_decls
+        .iter()
+        .find_map(|(name, (file, _))| {
+            if name == "main" || name.ends_with("::main") {
+                Some(file.as_str())
+            } else {
+                None
+            }
+        })?;
+    root_from_source_path(main_decl)
+}
+
+fn root_from_source_path(path: &str) -> Option<PathBuf> {
+    let idx = path.find("/src/")?;
+    let root = &path[..idx];
+    if root.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(root))
+}
+
+fn cargo_root_from_exe(exe_path: &Path) -> Option<PathBuf> {
+    let exe_name = exe_path.file_stem()?.to_string_lossy();
+    let mut current = exe_path.parent();
+    let mut fallback_root: Option<PathBuf> = None;
+
+    while let Some(dir) = current {
+        let cargo_path = dir.join("Cargo.toml");
+        if cargo_path.exists() {
+            if fallback_root.is_none() {
+                fallback_root = Some(dir.to_path_buf());
+            }
+            if cargo_toml_matches_exe(&cargo_path, &exe_name) {
+                return Some(dir.to_path_buf());
+            }
+        }
+        current = dir.parent();
+    }
+
+    fallback_root
+}
+
+fn cargo_toml_matches_exe(cargo_path: &Path, exe_name: &str) -> bool {
+    let contents = match std::fs::read_to_string(cargo_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let needle = format!("name = \"{}\"", exe_name);
+    contents.contains(&needle)
 }
 
 /// Check if a path looks like stdlib/library code

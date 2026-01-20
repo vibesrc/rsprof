@@ -441,6 +441,7 @@ pub struct App {
     selected_row: usize,
     scroll_offset: usize,
     selected_location_id: Option<i64>,
+    selected_heap_location_id: Option<i64>,
     selected_func_name: Option<String>,
     func_history: Vec<(f64, f64)>,
     last_history_tick: Instant,
@@ -495,6 +496,7 @@ impl App {
             selected_row: 0,
             scroll_offset: 0,
             selected_location_id: None,
+            selected_heap_location_id: None,
             selected_func_name: None,
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
@@ -569,6 +571,7 @@ impl App {
             selected_row: 0,
             scroll_offset: 0,
             selected_location_id: None,
+            selected_heap_location_id: None,
             selected_func_name: None,
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
@@ -821,37 +824,74 @@ impl App {
             }
 
             // Update selection state
-            if !self.cached_entries.is_empty() {
-                // If we have a selected location, find its current row index
-                if let Some(loc_id) = self.selected_location_id
-                    && let Some(idx) = self
-                        .cached_entries
-                        .iter()
-                        .position(|e| e.location_id == loc_id)
-                {
-                    self.selected_row = idx;
+            match self.view_mode {
+                ViewMode::Cpu => {
+                    if !self.cached_entries.is_empty() {
+                        // If we have a selected location, find its current row index
+                        if let Some(loc_id) = self.selected_location_id
+                            && let Some(idx) = self
+                                .cached_entries
+                                .iter()
+                                .position(|e| e.location_id == loc_id)
+                        {
+                            self.selected_row = idx;
+                        }
+
+                        // Clamp selected row to valid range
+                        self.selected_row = self.selected_row.min(self.cached_entries.len() - 1);
+
+                        // Clamp scroll offset to valid range
+                        let visible_height = self.table_area.height.saturating_sub(3) as usize;
+                        let max_scroll = self
+                            .cached_entries
+                            .len()
+                            .saturating_sub(visible_height.max(1));
+                        self.scroll_offset = self.scroll_offset.min(max_scroll);
+
+                        // Update timeseries for selected function
+                        let location_id = self.cached_entries[self.selected_row].location_id;
+                        let func_name = self.cached_entries[self.selected_row].function.clone();
+
+                        if self.is_static() {
+                            self.load_timeseries_static(location_id, &func_name);
+                        } else {
+                            let instant_pct =
+                                self.cached_entries[self.selected_row].instant_percent;
+                            self.update_func_history(location_id, &func_name, instant_pct);
+                        }
+                    }
                 }
+                ViewMode::Memory => {
+                    if !self.cached_heap_entries.is_empty() {
+                        if let Some(loc_id) = self.selected_heap_location_id {
+                            if let Some(idx) = self
+                                .cached_heap_entries
+                                .iter()
+                                .position(|e| e.location_id == loc_id)
+                            {
+                                self.selected_row = idx;
+                            } else {
+                                self.selected_heap_location_id = None;
+                            }
+                        }
 
-                // Clamp selected row to valid range
-                self.selected_row = self.selected_row.min(self.cached_entries.len() - 1);
+                        self.selected_row =
+                            self.selected_row.min(self.cached_heap_entries.len() - 1);
 
-                // Clamp scroll offset to valid range
-                let visible_height = self.table_area.height.saturating_sub(3) as usize;
-                let max_scroll = self
-                    .cached_entries
-                    .len()
-                    .saturating_sub(visible_height.max(1));
-                self.scroll_offset = self.scroll_offset.min(max_scroll);
+                        let visible_height = self.table_area.height.saturating_sub(3) as usize;
+                        let max_scroll = self
+                            .cached_heap_entries
+                            .len()
+                            .saturating_sub(visible_height.max(1));
+                        self.scroll_offset = self.scroll_offset.min(max_scroll);
 
-                // Update timeseries for selected function
-                let location_id = self.cached_entries[self.selected_row].location_id;
-                let func_name = self.cached_entries[self.selected_row].function.clone();
-
-                if self.is_static() {
-                    self.load_timeseries_static(location_id, &func_name);
-                } else {
-                    let instant_pct = self.cached_entries[self.selected_row].instant_percent;
-                    self.update_func_history(location_id, &func_name, instant_pct);
+                        if self.selected_heap_location_id.is_none() {
+                            self.selected_heap_location_id = Some(
+                                self.cached_heap_entries[self.selected_row].location_id,
+                            );
+                            self.heap_chart_cache.location_id = None;
+                        }
+                    }
                 }
             }
 
@@ -934,22 +974,22 @@ impl App {
             // gg/G - top/bottom
             KeyCode::Char('g') if self.focus == Focus::Table => {
                 self.selected_row = 0;
-                self.selected_location_id = None;
+                self.clear_selection_anchor();
                 self.ensure_selection_visible();
             }
             KeyCode::Char('G') if self.focus == Focus::Table => {
-                self.selected_row = self.cached_entries.len().saturating_sub(1);
-                self.selected_location_id = None;
+                self.selected_row = self.active_entry_count().saturating_sub(1);
+                self.clear_selection_anchor();
                 self.ensure_selection_visible();
             }
             KeyCode::Home if self.focus == Focus::Table => {
                 self.selected_row = 0;
-                self.selected_location_id = None;
+                self.clear_selection_anchor();
                 self.ensure_selection_visible();
             }
             KeyCode::End if self.focus == Focus::Table => {
-                self.selected_row = self.cached_entries.len().saturating_sub(1);
-                self.selected_location_id = None;
+                self.selected_row = self.active_entry_count().saturating_sub(1);
+                self.clear_selection_anchor();
                 self.ensure_selection_visible();
             }
 
@@ -1006,14 +1046,32 @@ impl App {
 
     /// Move table selection by delta rows (positive = down, negative = up)
     fn move_selection(&mut self, delta: i32) {
+        let entry_count = self.active_entry_count();
         let new_row = if delta >= 0 {
             self.selected_row.saturating_add(delta as usize)
         } else {
             self.selected_row.saturating_sub((-delta) as usize)
         };
-        self.selected_row = new_row.min(self.cached_entries.len().saturating_sub(1));
-        self.selected_location_id = None;
+        self.selected_row = new_row.min(entry_count.saturating_sub(1));
+        self.clear_selection_anchor();
         self.ensure_selection_visible();
+    }
+
+    fn active_entry_count(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Cpu => self.cached_entries.len(),
+            ViewMode::Memory => self.cached_heap_entries.len(),
+        }
+    }
+
+    fn clear_selection_anchor(&mut self) {
+        match self.view_mode {
+            ViewMode::Cpu => self.selected_location_id = None,
+            ViewMode::Memory => {
+                self.selected_heap_location_id = None;
+                self.heap_chart_cache.location_id = None;
+            }
+        }
     }
 
     /// Get half page size for Ctrl+d/u
@@ -1064,9 +1122,11 @@ impl App {
             // Convert visual row to actual entry index using current scroll offset
             let clicked_index = self.scroll_offset + click_row as usize;
 
-            if clicked_index < self.cached_entries.len() {
+            let entry_count = self.active_entry_count();
+
+            if clicked_index < entry_count {
                 self.selected_row = clicked_index;
-                self.selected_location_id = None; // Clear so we pick up new location
+                self.clear_selection_anchor();
             }
         }
         // Check if click is within chart area
@@ -1231,6 +1291,9 @@ impl App {
                     sparkline
                 });
         }
+
+        // New heap data arrived; force chart cache refresh for live updates.
+        self.heap_chart_cache.location_id = None;
     }
 
     /// Query chart data with DB-level aggregation and caching
@@ -1334,6 +1397,9 @@ impl App {
 
     /// Get the currently selected heap entry's location_id (for Memory mode)
     pub fn selected_heap_location_id(&self) -> Option<i64> {
+        if let Some(loc_id) = self.selected_heap_location_id {
+            return Some(loc_id);
+        }
         let selected = self
             .selected_row
             .min(self.cached_heap_entries.len().saturating_sub(1));
@@ -1344,6 +1410,13 @@ impl App {
 
     /// Get the currently selected heap entry's function name (for Memory mode)
     pub fn selected_heap_func(&self) -> Option<&str> {
+        if let Some(loc_id) = self.selected_heap_location_id {
+            return self
+                .cached_heap_entries
+                .iter()
+                .find(|e| e.location_id == loc_id)
+                .map(|e| e.function.as_str());
+        }
         let selected = self
             .selected_row
             .min(self.cached_heap_entries.len().saturating_sub(1));

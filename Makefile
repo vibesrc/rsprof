@@ -8,7 +8,7 @@ help:
 	@echo "  make build        Build debug version"
 	@echo "  make release      Build release version"
 	@echo "  make test         Run tests"
-	@echo "  make target       Build the example target app"
+	@echo "  make target       Build the example target app (profiling profile)"
 	@echo "  make run-target   Run the example target app"
 	@echo "  make profile      Profile the target app for 10s"
 	@echo "  make clean        Clean build artifacts"
@@ -32,12 +32,14 @@ clean:
 	cargo clean
 	rm -f rsprof.*.db
 
-# Example target app - debug build for accurate stack traces
+# Example target app - profiling build with frame pointers
 build-target:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo build -p rsprof --example target_app
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling -p rsprof --example target_app
 
 target: build-target
-	./target/debug/examples/target_app
+	./target/profiling/examples/target_app
+
+run-target: target
 
 # Profile the running target app
 PROFILE_DURATION ?= 10s
@@ -89,7 +91,7 @@ view:
 # Quick demo: build everything, run target in background, profile, show results
 demo: release target
 	@echo "Starting target_app in background..."
-	@./target/debug/examples/target_app & \
+	@./target/profiling/examples/target_app & \
 	APP_PID=$$!; \
 	sleep 2; \
 	echo "Profiling for 5 seconds..."; \

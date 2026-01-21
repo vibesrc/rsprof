@@ -46,12 +46,20 @@ Or customize the CPU sampling frequency:
 rsprof_trace::profiler!(cpu = 199);  // 199Hz instead of default 99Hz
 ```
 
-### 3. Build with frame pointers
+### 3. Build with profiling profile
 
-Frame pointers are required for accurate stack traces:
+In your app, add a profiling profile:
+
+```toml
+[profile.profiling]
+inherits = "release"
+debug = true
+```
+
+Then build with frame pointers enabled:
 
 ```bash
-RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling
 ```
 
 ### 4. Run the profiler
@@ -229,7 +237,7 @@ rsprof query profile.db "
 
 - Linux (uses perf events and shared memory)
 - Rust nightly (uses `let_chains` feature)
-- Frame pointers enabled for accurate stack traces
+- Frame pointers enabled for accurate stack traces (use `RUSTFLAGS="-C force-frame-pointers=yes"`)
 
 ## License
 

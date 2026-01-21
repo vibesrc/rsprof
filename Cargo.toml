@@ -11,8 +11,9 @@ edition = "2024"
 license = "MIT"
 
 [profile.release]
-debug = true
-# NOTE: To enable frame pointers (required for heap profiling stack traces),
-# build with: RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 lto = "thin"
 codegen-units = 16
+
+[profile.profiling]
+inherits = "release"
+debug = true

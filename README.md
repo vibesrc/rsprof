@@ -4,9 +4,13 @@ A zero-instrumentation profiler for Rust applications with real-time CPU and hea
 
 ## Screenshots
 
-| CPU | Heap |
-| --- | --- |
-| ![CPU view](docs/media/cpu.png) | ![Heap view](docs/media/heap.png) |
+### CPU
+
+![CPU view](docs/media/cpu.png)
+
+### Heap
+
+![Heap view](docs/media/heap.png)
 
 ## Features
 
@@ -37,6 +41,7 @@ fn main() {
 ```
 
 Or customize the CPU sampling frequency:
+
 ```rust
 rsprof_trace::profiler!(cpu = 199);  // 199Hz instead of default 99Hz
 ```
@@ -125,17 +130,17 @@ rsprof query profile.db "SELECT * FROM cpu_samples LIMIT 10"
 
 ## TUI Controls
 
-| Key | Action |
-|-----|--------|
-| `q` / `Esc` | Quit |
-| `1` / `2` | Switch to CPU / Memory view |
-| `m` | Toggle view mode |
-| `c` / `Enter` | Toggle chart visibility |
-| `j` / `k` | Navigate table (down/up) |
-| `h` / `l` | Pan chart (left/right) |
-| `+` / `-` | Zoom chart (in/out) |
-| `Tab` | Switch focus (table/chart) |
-| `p` | Pause/resume (live mode) |
+| Key           | Action                      |
+| ------------- | --------------------------- |
+| `q` / `Esc`   | Quit                        |
+| `1` / `2`     | Switch to CPU / Memory view |
+| `m`           | Toggle view mode            |
+| `c` / `Enter` | Toggle chart visibility     |
+| `j` / `k`     | Navigate table (down/up)    |
+| `h` / `l`     | Pan chart (left/right)      |
+| `+` / `-`     | Zoom chart (in/out)         |
+| `Tab`         | Switch focus (table/chart)  |
+| `p`           | Pause/resume (live mode)    |
 
 ## rsprof-trace Features
 
@@ -170,13 +175,13 @@ Memory profiling tracks every allocation and deallocation in your application, l
 
 ### What's Tracked
 
-| Metric | Description |
-|--------|-------------|
-| Live bytes | Currently allocated memory (allocs - frees) |
-| Total allocated | Cumulative bytes allocated |
-| Total freed | Cumulative bytes freed |
-| Alloc count | Number of allocation calls |
-| Free count | Number of deallocation calls |
+| Metric          | Description                                 |
+| --------------- | ------------------------------------------- |
+| Live bytes      | Currently allocated memory (allocs - frees) |
+| Total allocated | Cumulative bytes allocated                  |
+| Total freed     | Cumulative bytes freed                      |
+| Alloc count     | Number of allocation calls                  |
+| Free count      | Number of deallocation calls                |
 
 ### Memory View
 
@@ -196,6 +201,7 @@ Live     Trend      Function                    Location
 ### Finding Memory Leaks
 
 Look for call sites where:
+
 - Live bytes keep growing over time (upward sparkline trend)
 - Alloc count >> Free count
 

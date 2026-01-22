@@ -205,7 +205,9 @@ fn render_unified_table(
             .track_symbol(Some("│"))
             .thumb_symbol("█");
 
-        let mut scrollbar_state = ScrollbarState::new(rows.len()).position(scroll_offset);
+        let mut scrollbar_state = ScrollbarState::new(rows.len())
+            .position(scroll_offset)
+            .viewport_content_length(visible_height);
 
         let scrollbar_area = Rect {
             x: state.area.x + state.area.width - 1,

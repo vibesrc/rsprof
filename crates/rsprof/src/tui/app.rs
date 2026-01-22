@@ -29,6 +29,7 @@ struct ChartDataCache {
     points_per_sec: f64,
     /// Cached data points
     data: Vec<(f64, f64)>,
+    checkpoint_seq: u64,
 }
 
 /// Cache for heap chart data
@@ -39,6 +40,7 @@ struct HeapChartCache {
     cache_end_secs: f64,
     points_per_sec: f64,
     data: Vec<(f64, f64)>,
+    checkpoint_seq: u64,
 }
 
 struct LocationInfo {
@@ -491,6 +493,7 @@ pub struct App {
     live_cpu_instant: HashMap<i64, u64>,
     location_info: HashMap<i64, LocationInfo>,
     heap_live_entries: HashMap<i64, HeapEntry>,
+    chart_checkpoint_seq: u64,
     cached_entries: Vec<CpuEntry>,
     cached_heap_entries: Vec<HeapEntry>,
     cached_cpu_sparklines: HashMap<i64, VecDeque<i64>>,
@@ -556,6 +559,7 @@ impl App {
             live_cpu_instant: HashMap::new(),
             location_info: HashMap::new(),
             heap_live_entries: HashMap::new(),
+            chart_checkpoint_seq: 0,
             cached_entries: Vec::new(),
             cached_heap_entries: Vec::new(),
             cached_cpu_sparklines: HashMap::new(),
@@ -639,6 +643,7 @@ impl App {
             live_cpu_instant: HashMap::new(),
             location_info: HashMap::new(),
             heap_live_entries: HashMap::new(),
+            chart_checkpoint_seq: 0,
             cached_entries: entries,
             cached_heap_entries: heap_entries,
             cached_cpu_sparklines: HashMap::new(),
@@ -960,6 +965,7 @@ impl App {
                 }
 
                 if did_checkpoint {
+                    self.chart_checkpoint_seq = self.chart_checkpoint_seq.wrapping_add(1);
                     for (location_id, entry) in heap_entries_map {
                         self.heap_live_entries.insert(location_id, entry);
                     }
@@ -1731,6 +1737,7 @@ impl App {
         let cache_valid = self.chart_data_cache.location_id == Some(location_id)
             && visible_start >= self.chart_data_cache.cache_start_secs
             && visible_end <= self.chart_data_cache.cache_end_secs
+            && self.chart_data_cache.checkpoint_seq == self.chart_checkpoint_seq
             && (self.chart_data_cache.points_per_sec - points_per_sec).abs()
                 / points_per_sec.max(0.001)
                 < 0.2;
@@ -1759,6 +1766,7 @@ impl App {
             self.chart_data_cache.cache_end_secs = prefetch_end;
             self.chart_data_cache.points_per_sec = points_per_sec;
             self.chart_data_cache.data = data;
+            self.chart_data_cache.checkpoint_seq = self.chart_checkpoint_seq;
         }
 
         &self.chart_data_cache.data
@@ -1847,6 +1855,7 @@ impl App {
         let cache_valid = self.heap_chart_cache.location_id == Some(location_id)
             && visible_start >= self.heap_chart_cache.cache_start_secs
             && visible_end <= self.heap_chart_cache.cache_end_secs
+            && self.heap_chart_cache.checkpoint_seq == self.chart_checkpoint_seq
             && (self.heap_chart_cache.points_per_sec - points_per_sec).abs()
                 / points_per_sec.max(0.001)
                 < 0.2;
@@ -1876,6 +1885,7 @@ impl App {
             self.heap_chart_cache.cache_end_secs = prefetch_end;
             self.heap_chart_cache.points_per_sec = points_per_sec;
             self.heap_chart_cache.data = data;
+            self.heap_chart_cache.checkpoint_seq = self.chart_checkpoint_seq;
         }
 
         &self.heap_chart_cache.data

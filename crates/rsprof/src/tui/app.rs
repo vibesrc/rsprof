@@ -279,7 +279,7 @@ impl TableSort {
 
     fn default_heap() -> Self {
         TableSort {
-            column: SortColumn::Total,
+            column: SortColumn::Live,
             descending: true,
         }
     }
@@ -969,6 +969,9 @@ impl App {
                         self.heap_live_entries.values().cloned().collect();
                     self.update_heap_entries(heap_entries);
                     self.update_sparklines();
+                    // New data available; refresh chart data next time it's rendered.
+                    self.chart_data_cache.location_id = None;
+                    self.heap_chart_cache.location_id = None;
                     self.live_cpu_instant.clear();
                     checkpointed = true;
                 }
@@ -1074,6 +1077,7 @@ impl App {
 
         match key {
             // Global controls
+            KeyCode::Char('c') if ctrl => self.running = false,
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
             KeyCode::Char('p') if !self.is_static() => self.paused = !self.paused,
             KeyCode::Tab => {
@@ -1101,12 +1105,6 @@ impl App {
             // c or Enter - toggle chart visibility
             KeyCode::Char('c') | KeyCode::Enter => {
                 self.chart_visible = !self.chart_visible;
-                // When showing chart, focus moves to chart; when hiding, focus on table
-                self.focus = if self.chart_visible {
-                    Focus::Chart
-                } else {
-                    Focus::Table
-                };
             }
 
             // === TABLE CONTROLS (vim-style) ===

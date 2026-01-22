@@ -1,6 +1,6 @@
 # rsprof
 
-A zero-instrumentation profiler for Rust applications with real-time CPU and heap analysis.
+An all-in-one profiler for Rust applications with real-time CPU and heap analysis (no external profilers, eBPF tools, or sidecar apps).
 
 ## Screenshots
 
@@ -14,8 +14,8 @@ A zero-instrumentation profiler for Rust applications with real-time CPU and hea
 
 ## Features
 
-- **CPU profiling** - Timer-based sampling via perf events or self-instrumentation
-- **Heap profiling** - Track allocations, deallocations, and live memory
+- **CPU profiling** - Timer-based sampling via perf events or the built-in sampler (no external profilers)
+- **Heap profiling** - Custom allocator traces allocations, deallocations, and live memory
 - **Interactive TUI** - Real-time charts and tables with vim-style navigation
 - **SQLite storage** - Query profiles with SQL, export to JSON/CSV
 - **Symbol resolution** - Full DWARF debug info support

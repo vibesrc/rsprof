@@ -49,7 +49,6 @@ struct LocationInfo {
     function: String,
 }
 
-
 use super::ui;
 
 /// Patterns for internal/profiler functions to skip
@@ -823,13 +822,13 @@ impl App {
                                 );
                                 *live_cpu_totals.entry(location_id).or_insert(0) += 1;
                                 *live_cpu_instant.entry(location_id).or_insert(0) += 1;
-                                location_info.entry(location_id).or_insert_with(|| {
-                                    LocationInfo {
+                                location_info
+                                    .entry(location_id)
+                                    .or_insert_with(|| LocationInfo {
                                         file: location.file,
                                         line: location.line,
                                         function: location.function,
-                                    }
-                                });
+                                    });
                             }
                         }
 
@@ -859,18 +858,19 @@ impl App {
                                         stats.total_allocs,
                                         stats.total_frees,
                                     );
-                                    let entry = heap_entries_map
-                                        .entry(location_id)
-                                        .or_insert_with(|| HeapEntry {
-                                            location_id,
-                                            file: location.file,
-                                            line: location.line,
-                                            function: location.function,
-                                            live_bytes: 0,
-                                            total_alloc_bytes: 0,
-                                            total_free_bytes: 0,
-                                            alloc_count: 0,
-                                            free_count: 0,
+                                    let entry =
+                                        heap_entries_map.entry(location_id).or_insert_with(|| {
+                                            HeapEntry {
+                                                location_id,
+                                                file: location.file,
+                                                line: location.line,
+                                                function: location.function,
+                                                live_bytes: 0,
+                                                total_alloc_bytes: 0,
+                                                total_free_bytes: 0,
+                                                alloc_count: 0,
+                                                free_count: 0,
+                                            }
                                         });
                                     entry.live_bytes += stats.live_bytes;
                                     entry.total_alloc_bytes += stats.total_alloc_bytes as i64;
@@ -886,9 +886,11 @@ impl App {
                     }
                 }
                 // Fallback: Use perf-based CPU sampling
-                else if let (Some(sampler), Some(resolver), Some(storage)) =
-                    (self.sampler.as_mut(), self.resolver.as_ref(), self.storage.as_mut())
-                {
+                else if let (Some(sampler), Some(resolver), Some(storage)) = (
+                    self.sampler.as_mut(),
+                    self.resolver.as_ref(),
+                    self.storage.as_mut(),
+                ) {
                     let samples = sampler.read_samples()?;
                     self.total_samples += samples.len() as u64;
 
@@ -901,13 +903,13 @@ impl App {
                             let location_id = storage.record_cpu_sample(addr, &location);
                             *live_cpu_totals.entry(location_id).or_insert(0) += 1;
                             *live_cpu_instant.entry(location_id).or_insert(0) += 1;
-                            location_info.entry(location_id).or_insert_with(|| {
-                                LocationInfo {
+                            location_info
+                                .entry(location_id)
+                                .or_insert_with(|| LocationInfo {
                                     file: location.file,
                                     line: location.line,
                                     function: location.function,
-                                }
-                            });
+                                });
                         }
                     }
 
@@ -937,18 +939,19 @@ impl App {
                                         stats.total_allocs,
                                         stats.total_frees,
                                     );
-                                    let entry = heap_entries_map
-                                        .entry(location_id)
-                                        .or_insert_with(|| HeapEntry {
-                                            location_id,
-                                            file: location.file,
-                                            line: location.line,
-                                            function: location.function,
-                                            live_bytes: 0,
-                                            total_alloc_bytes: 0,
-                                            total_free_bytes: 0,
-                                            alloc_count: 0,
-                                            free_count: 0,
+                                    let entry =
+                                        heap_entries_map.entry(location_id).or_insert_with(|| {
+                                            HeapEntry {
+                                                location_id,
+                                                file: location.file,
+                                                line: location.line,
+                                                function: location.function,
+                                                live_bytes: 0,
+                                                total_alloc_bytes: 0,
+                                                total_free_bytes: 0,
+                                                alloc_count: 0,
+                                                free_count: 0,
+                                            }
                                         });
                                     entry.live_bytes += stats.live_bytes;
                                     entry.total_alloc_bytes += stats.total_alloc_bytes as i64;
@@ -1521,7 +1524,11 @@ impl App {
                 ("[unknown]".to_string(), 0, "[unknown]".to_string())
             };
 
-            let instant = self.live_cpu_instant.get(&location_id).copied().unwrap_or(0);
+            let instant = self
+                .live_cpu_instant
+                .get(&location_id)
+                .copied()
+                .unwrap_or(0);
             entries.push(CpuEntry {
                 location_id,
                 file,

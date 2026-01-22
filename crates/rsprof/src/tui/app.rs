@@ -289,11 +289,11 @@ pub enum ViewMode {
 /// Fixed zoom levels with corresponding aggregation bucket sizes
 /// (window_secs, bucket_secs) - bucket is None if no aggregation needed
 const ZOOM_LEVELS: &[(f64, Option<f64>)] = &[
-    (5.0, None),             // 5s  - no aggregation
-    (10.0, None),            // 10s - no aggregation
-    (15.0, None),            // 15s - no aggregation
-    (30.0, None),            // 30s - no aggregation
-    (60.0, None),            // 1m  - no aggregation
+    (5.0, Some(1.0)),        // 5s  - 1s buckets
+    (10.0, Some(1.0)),       // 10s - 1s buckets
+    (15.0, Some(1.0)),       // 15s - 1s buckets
+    (30.0, Some(1.0)),       // 30s - 1s buckets
+    (60.0, Some(1.0)),       // 1m  - 1s buckets
     (300.0, Some(5.0)),      // 5m  - 5s buckets
     (900.0, Some(15.0)),     // 15m - 15s buckets
     (1800.0, Some(30.0)),    // 30m - 30s buckets
@@ -467,6 +467,8 @@ pub struct App {
     total_samples: u64,
     running: bool,
     paused: bool,
+    last_draw: Instant,
+    include_internal: bool,
 
     // Selection state
     selected_row: usize,
@@ -503,6 +505,7 @@ pub struct App {
 
 impl App {
     /// Create a new live profiling app
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         perf_sampler: Option<CpuSampler>,
         heap_sampler: Option<HeapSampler>,
@@ -511,6 +514,7 @@ impl App {
         storage: Storage,
         checkpoint_interval: Duration,
         max_duration: Option<Duration>,
+        include_internal: bool,
     ) -> Self {
         App {
             sampler: perf_sampler,
@@ -526,6 +530,8 @@ impl App {
             total_samples: 0,
             running: true,
             paused: false,
+            last_draw: Instant::now(),
+            include_internal,
             selected_row: 0,
             scroll_offset: 0,
             selected_location_id: None,
@@ -603,6 +609,8 @@ impl App {
             total_samples: total_samples as u64,
             running: true,
             paused: true, // Static mode is always "paused"
+            last_draw: Instant::now(),
+            include_internal: false,
             selected_row: 0,
             scroll_offset: 0,
             selected_location_id: None,
@@ -704,17 +712,21 @@ impl App {
             }
 
             // Handle input
-            let poll_duration = if self.is_static() {
-                Duration::from_millis(50) // Static mode: slower polling, less CPU
+            let poll_duration = if self.is_static() || self.paused {
+                Duration::from_millis(80)
             } else {
-                Duration::from_millis(10)
+                Duration::from_millis(20)
             };
+
+            let mut needs_redraw = false;
+            let mut checkpointed = false;
 
             if event::poll(poll_duration)? {
                 match event::read()? {
                     Event::Key(key) => {
                         if key.kind == KeyEventKind::Press {
                             self.handle_key(key.code, key.modifiers);
+                            needs_redraw = true;
                         }
                     }
                     Event::Mouse(mouse) => {
@@ -722,6 +734,7 @@ impl App {
                         match mouse.kind {
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                                 self.handle_click(mouse.column, mouse.row);
+                                needs_redraw = true;
                             }
                             MouseEventKind::ScrollUp => {
                                 if self.focus == Focus::Table {
@@ -733,6 +746,7 @@ impl App {
                                     // Scroll = pan on chart
                                     self.chart_state.pan_left();
                                 }
+                                needs_redraw = true;
                             }
                             MouseEventKind::ScrollDown => {
                                 if self.focus == Focus::Table {
@@ -744,6 +758,7 @@ impl App {
                                     // Scroll = pan on chart
                                     self.chart_state.pan_right();
                                 }
+                                needs_redraw = true;
                             }
                             _ => {}
                         }
@@ -766,10 +781,13 @@ impl App {
                     let cpu_samples = shm.read_cpu_samples();
                     for sample in cpu_samples {
                         self.total_samples += 1;
-                        // Walk the stack to find the first user frame (skip allocator/profiler internals)
-                        let location = find_user_frame(&sample.stack, resolver);
-                        // Only record if we found a user frame (not internal/library code)
-                        if !is_internal_location(&location) {
+                        let location = if self.include_internal {
+                            resolve_internal_stack(&sample.stack, resolver)
+                        } else {
+                            // Walk the stack to find the first user frame (skip allocator/profiler internals)
+                            find_user_frame(&sample.stack, resolver)
+                        };
+                        if self.include_internal || !is_internal_location(&location) {
                             storage.record_cpu_sample(
                                 sample.stack.first().copied().unwrap_or(0),
                                 &location,
@@ -784,11 +802,17 @@ impl App {
                         let inline_stacks = shm.read_inline_stacks();
                         for (key_addr, stats) in heap_stats {
                             let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                                find_user_frame(stack, resolver)
+                                if self.include_internal {
+                                    resolve_internal_stack(stack, resolver)
+                                } else {
+                                    find_user_frame(stack, resolver)
+                                }
+                            } else if self.include_internal {
+                                crate::symbols::Location::unknown()
                             } else {
                                 resolver.resolve(key_addr)
                             };
-                            if !is_internal_location(&location) {
+                            if self.include_internal || !is_internal_location(&location) {
                                 storage.record_heap_sample(
                                     &location,
                                     stats.total_alloc_bytes as i64,
@@ -803,6 +827,7 @@ impl App {
                         storage.flush_checkpoint()?;
                         self.last_checkpoint = Instant::now();
                         self.update_sparklines();
+                        checkpointed = true;
                     }
                 }
                 // Fallback: Use perf-based CPU sampling
@@ -816,7 +841,7 @@ impl App {
 
                     for addr in samples {
                         let location = resolver.resolve(addr);
-                        if !is_internal_location(&location) {
+                        if self.include_internal || !is_internal_location(&location) {
                             storage.record_cpu_sample(addr, &location);
                         }
                     }
@@ -828,11 +853,17 @@ impl App {
                             let inline_stacks = hs.read_inline_stacks();
                             for (key_addr, stats) in heap_stats {
                                 let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                                    find_user_frame(stack, resolver)
+                                    if self.include_internal {
+                                        resolve_internal_stack(stack, resolver)
+                                    } else {
+                                        find_user_frame(stack, resolver)
+                                    }
+                                } else if self.include_internal {
+                                    crate::symbols::Location::unknown()
                                 } else {
                                     resolver.resolve(key_addr)
                                 };
-                                if !is_internal_location(&location) {
+                                if self.include_internal || !is_internal_location(&location) {
                                     storage.record_heap_sample(
                                         &location,
                                         stats.total_alloc_bytes as i64,
@@ -848,6 +879,7 @@ impl App {
                         storage.flush_checkpoint()?;
                         self.last_checkpoint = Instant::now();
                         self.update_sparklines();
+                        checkpointed = true;
                     }
                 }
             }
@@ -929,9 +961,17 @@ impl App {
             }
 
             // Render UI
-            terminal.draw(|frame| {
-                ui::render(frame, self);
-            })?;
+            let frame_interval = if self.is_static() || self.paused {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(33)
+            };
+            if needs_redraw || checkpointed || self.last_draw.elapsed() >= frame_interval {
+                terminal.draw(|frame| {
+                    ui::render(frame, self);
+                })?;
+                self.last_draw = Instant::now();
+            }
         }
 
         // Final flush (live mode only)
@@ -1519,8 +1559,8 @@ impl App {
             None => return &[],
         };
 
-        let visible_range = visible_end - visible_start;
-        let points_per_sec = num_columns as f64 / visible_range;
+        let (prefetch_start, prefetch_end, num_buckets, points_per_sec) =
+            self.chart_bucket_params(visible_start, visible_end, num_columns);
 
         // Check if cache is valid:
         // - Same location
@@ -1534,15 +1574,6 @@ impl App {
                 < 0.2;
 
         if !cache_valid {
-            // Prefetch 3x the visible window (1 before, visible, 1 after)
-            let prefetch_start = (visible_start - visible_range).max(0.0);
-            let prefetch_end = visible_end + visible_range;
-            let prefetch_range = prefetch_end - prefetch_start;
-
-            // Calculate number of buckets for prefetch window
-            let num_buckets =
-                ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
-
             let start_ms = (prefetch_start * 1000.0) as i64;
             let end_ms = (prefetch_end * 1000.0) as i64;
 
@@ -1647,8 +1678,8 @@ impl App {
             None => return &[],
         };
 
-        let visible_range = visible_end - visible_start;
-        let points_per_sec = num_columns as f64 / visible_range;
+        let (prefetch_start, prefetch_end, num_buckets, points_per_sec) =
+            self.chart_bucket_params(visible_start, visible_end, num_columns);
 
         // Check if cache is valid
         let cache_valid = self.heap_chart_cache.location_id == Some(location_id)
@@ -1659,14 +1690,6 @@ impl App {
                 < 0.2;
 
         if !cache_valid {
-            // Prefetch 3x the visible window
-            let prefetch_start = (visible_start - visible_range).max(0.0);
-            let prefetch_end = visible_end + visible_range;
-            let prefetch_range = prefetch_end - prefetch_start;
-
-            let num_buckets =
-                ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
-
             let start_ms = (prefetch_start * 1000.0) as i64;
             let end_ms = (prefetch_end * 1000.0) as i64;
 
@@ -1695,8 +1718,85 @@ impl App {
 
         &self.heap_chart_cache.data
     }
+
+    fn chart_bucket_params(
+        &self,
+        visible_start: f64,
+        visible_end: f64,
+        num_columns: usize,
+    ) -> (f64, f64, usize, f64) {
+        let visible_range = (visible_end - visible_start).max(0.0);
+        if visible_range == 0.0 {
+            return (visible_start, visible_end, 0, 0.0);
+        }
+
+        if let Some(bucket_secs) = self.chart_state.aggregation_bucket() {
+            let bucket_ms = (bucket_secs * 1000.0).round() as i64;
+            let bucket_ms = bucket_ms.max(1);
+            let visible_start_ms = (visible_start * 1000.0).floor() as i64;
+            let visible_end_ms = (visible_end * 1000.0).ceil() as i64;
+
+            let align_down = |value: i64| value - (value % bucket_ms);
+            let align_up = |value: i64| {
+                let rem = value % bucket_ms;
+                if rem == 0 {
+                    value
+                } else {
+                    value + (bucket_ms - rem)
+                }
+            };
+
+            let aligned_start_ms = align_down(visible_start_ms).max(0);
+            let aligned_end_ms = align_up(visible_end_ms).max(aligned_start_ms + bucket_ms);
+            let aligned_range_ms = (aligned_end_ms - aligned_start_ms) as f64;
+
+            let prefetch_start_ms =
+                align_down(((aligned_start_ms as f64 - aligned_range_ms).max(0.0)) as i64);
+            let prefetch_end_ms = align_up(aligned_end_ms + aligned_range_ms as i64);
+
+            let num_buckets = ((prefetch_end_ms - prefetch_start_ms) / bucket_ms).max(1) as usize;
+            let points_per_sec = 1.0 / bucket_secs.max(0.001);
+
+            (
+                prefetch_start_ms as f64 / 1000.0,
+                prefetch_end_ms as f64 / 1000.0,
+                num_buckets,
+                points_per_sec,
+            )
+        } else {
+            let points_per_sec = num_columns as f64 / visible_range;
+            let prefetch_start = (visible_start - visible_range).max(0.0);
+            let prefetch_end = visible_end + visible_range;
+            let prefetch_range = prefetch_end - prefetch_start;
+            let num_buckets =
+                ((prefetch_range / visible_range) * num_columns as f64).ceil() as usize;
+
+            (
+                prefetch_start,
+                prefetch_end,
+                num_buckets.max(1),
+                points_per_sec,
+            )
+        }
+    }
 }
 
 fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn resolve_internal_stack(
+    stack: &[u64],
+    resolver: &crate::symbols::SymbolResolver,
+) -> crate::symbols::Location {
+    for &addr in stack {
+        if addr == 0 {
+            continue;
+        }
+        let loc = resolver.resolve(addr);
+        if loc.function != "_fini" && loc.function != "[unknown]" {
+            return loc;
+        }
+    }
+    crate::symbols::Location::unknown()
 }

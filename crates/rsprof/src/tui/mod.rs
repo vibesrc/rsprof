@@ -11,6 +11,7 @@ use std::time::Duration;
 pub use app::App;
 
 /// Run the TUI profiler
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     perf_sampler: Option<CpuSampler>,
     heap_sampler: Option<HeapSampler>,
@@ -19,6 +20,7 @@ pub fn run(
     storage: Storage,
     checkpoint_interval: Duration,
     max_duration: Option<Duration>,
+    include_internal: bool,
 ) -> Result<()> {
     let mut app = App::new(
         perf_sampler,
@@ -28,6 +30,7 @@ pub fn run(
         storage,
         checkpoint_interval,
         max_duration,
+        include_internal,
     );
     app.run()
 }

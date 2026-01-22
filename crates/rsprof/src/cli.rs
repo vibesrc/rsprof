@@ -37,6 +37,10 @@ pub struct Cli {
     /// Disable TUI, record only
     #[arg(long, short = 'q')]
     pub quiet: bool,
+
+    /// Include internal/profiler frames in recording
+    #[arg(long)]
+    pub include_internal: bool,
 }
 
 #[derive(Subcommand, Debug)]

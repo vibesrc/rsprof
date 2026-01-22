@@ -1,4 +1,4 @@
-.PHONY: build release test clean target run-target profile help
+.PHONY: build release test clean target run-target profile help profile-profile profile-profiler build-profiler
 
 # Default target
 help:
@@ -10,7 +10,9 @@ help:
 	@echo "  make test         Run tests"
 	@echo "  make target       Build the example target app (profiling profile)"
 	@echo "  make run-target   Run the example target app"
-	@echo "  make profile      Profile the target app for 10s"
+	@echo "  make profile      Profile the target app for 10s (manual run)"
+	@echo "  make profile-profile   Run rsprof in this terminal (attaches to running target_app)"
+	@echo "  make profile-profiler  Run rsprof in this terminal (attaches to running rsprof)"
 	@echo "  make clean        Clean build artifacts"
 	@echo ""
 	@echo "Quick start:"
@@ -24,6 +26,9 @@ build:
 
 release:
 	cargo build --release
+
+build-profiler:
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling -p rsprof --features self-profile
 
 test:
 	cargo test
@@ -54,6 +59,30 @@ profile: release
 	fi; \
 	echo "Profiling target_app (PID $$PID) for $(PROFILE_DURATION)..."; \
 	./target/release/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
+
+# Attach to running target_app in this terminal
+profile-profile: build-profiler
+	@PID=$$(pgrep -x target_app 2>/dev/null); \
+	if [ -z "$$PID" ]; then \
+		echo "Error: target_app is not running."; \
+		echo "Start it first with: make target"; \
+		exit 1; \
+	fi; \
+	echo "Attaching rsprof to target_app (PID $$PID)..."; \
+	./target/profiling/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
+
+# Attach to running rsprof in this terminal (set RSPROF_PID if multiple)
+PROFILER_OUTPUT ?= profiler.db
+profile-profiler: build-profiler
+	@PID=$${RSPROF_PID:-$$(pgrep -n rsprof 2>/dev/null)}; \
+	if [ -z "$$PID" ]; then \
+		echo "Error: rsprof is not running."; \
+		echo "Start it first with: make profile-profile"; \
+		echo "If multiple rsprof are running, set RSPROF_PID=<pid>."; \
+		exit 1; \
+	fi; \
+	echo "Attaching rsprof to rsprof (PID $$PID)..."; \
+	./target/profiling/rsprof --pid $$PID --include-internal -o $(PROFILER_OUTPUT)
 
 # View the last profile
 top-cpu:

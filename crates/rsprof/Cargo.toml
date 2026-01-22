@@ -40,6 +40,7 @@ crossterm = "0.28"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 humantime = "2"
 comfy-table = "7"
+rsprof-trace = { path = "../rsprof-trace", optional = true, features = ["profiling"] }
 
 [build-dependencies]
 libbpf-cargo = { version = "0.24", optional = true }
@@ -47,9 +48,11 @@ libbpf-cargo = { version = "0.24", optional = true }
 [features]
 default = ["heap"]
 heap = ["libbpf-rs", "plain", "libbpf-cargo"]
+self-profile = ["rsprof-trace"]
 
 [dev-dependencies]
 rsprof-trace = { path = "../rsprof-trace", features = ["profiling"] }
+
 
 [[example]]
 name = "target_app"

@@ -4,6 +4,10 @@ use rsprof::cli::{Cli, Command};
 use rsprof::error::exit_code;
 use std::process::ExitCode;
 
+// Enable self-profiling (rsprof-ception) when built with --features self-profile.
+#[cfg(feature = "self-profile")]
+rsprof_trace::profiler!();
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::from(exit_code::SUCCESS as u8),
@@ -164,6 +168,7 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
             storage,
             cli.interval,
             cli.duration,
+            cli.include_internal,
         )?;
     } else {
         rsprof::tui::run(
@@ -174,6 +179,7 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
             storage,
             cli.interval,
             cli.duration,
+            cli.include_internal,
         )?;
     }
 
@@ -382,6 +388,7 @@ fn find_user_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_headless(
     mut perf_sampler: Option<rsprof::cpu::CpuSampler>,
     heap_sampler: Option<rsprof::heap::HeapSampler>,
@@ -390,6 +397,7 @@ fn run_headless(
     mut storage: rsprof::storage::Storage,
     checkpoint_interval: std::time::Duration,
     duration: Option<std::time::Duration>,
+    include_internal: bool,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -425,10 +433,13 @@ fn run_headless(
             let cpu_samples = shm.read_cpu_samples();
             for sample in cpu_samples {
                 total_cpu_samples += 1;
-                // Walk the stack to find the first user frame (skip allocator/profiler internals)
-                let location = find_user_frame(&sample.stack, &resolver);
-                // Only record if we found a user frame (not internal/library code)
-                if !is_internal_location(&location) {
+                let location = if include_internal {
+                    resolve_internal_stack(&sample.stack, &resolver)
+                } else {
+                    // Walk the stack to find the first user frame (skip allocator/profiler internals)
+                    find_user_frame(&sample.stack, &resolver)
+                };
+                if include_internal || !is_internal_location(&location) {
                     storage
                         .record_cpu_sample(sample.stack.first().copied().unwrap_or(0), &location);
                 }
@@ -447,7 +458,7 @@ fn run_headless(
 
             for addr in samples {
                 let location = resolver.resolve(addr);
-                if !is_internal_location(&location) {
+                if include_internal || !is_internal_location(&location) {
                     storage.record_cpu_sample(addr, &location);
                 }
             }
@@ -463,11 +474,17 @@ fn run_headless(
 
                 for (key_addr, stats) in heap_stats {
                     let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                        find_user_frame(stack, &resolver)
+                        if include_internal {
+                            resolve_internal_stack(stack, &resolver)
+                        } else {
+                            find_user_frame(stack, &resolver)
+                        }
+                    } else if include_internal {
+                        rsprof::symbols::Location::unknown()
                     } else {
                         resolver.resolve(key_addr)
                     };
-                    if !is_internal_location(&location) {
+                    if include_internal || !is_internal_location(&location) {
                         storage.record_heap_sample(
                             &location,
                             stats.total_alloc_bytes as i64,
@@ -490,11 +507,17 @@ fn run_headless(
 
                 for (key_addr, stats) in heap_stats {
                     let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                        find_user_frame(stack, &resolver)
+                        if include_internal {
+                            resolve_internal_stack(stack, &resolver)
+                        } else {
+                            find_user_frame(stack, &resolver)
+                        }
+                    } else if include_internal {
+                        rsprof::symbols::Location::unknown()
                     } else {
                         resolver.resolve(key_addr)
                     };
-                    if !is_internal_location(&location) {
+                    if include_internal || !is_internal_location(&location) {
                         storage.record_heap_sample(
                             &location,
                             stats.total_alloc_bytes as i64,
@@ -529,4 +552,20 @@ fn run_headless(
     );
 
     Ok(())
+}
+
+fn resolve_internal_stack(
+    stack: &[u64],
+    resolver: &rsprof::symbols::SymbolResolver,
+) -> rsprof::symbols::Location {
+    for &addr in stack {
+        if addr == 0 {
+            continue;
+        }
+        let loc = resolver.resolve(addr);
+        if loc.function != "_fini" && loc.function != "[unknown]" {
+            return loc;
+        }
+    }
+    rsprof::symbols::Location::unknown()
 }

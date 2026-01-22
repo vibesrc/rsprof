@@ -41,6 +41,13 @@ struct HeapChartCache {
     data: Vec<(f64, f64)>,
 }
 
+struct LocationInfo {
+    file: String,
+    line: u32,
+    function: String,
+}
+
+
 use super::ui;
 
 /// Patterns for internal/profiler functions to skip
@@ -480,6 +487,10 @@ pub struct App {
     heap_sort: TableSort,
     func_history: Vec<(f64, f64)>,
     last_history_tick: Instant,
+    live_cpu_totals: HashMap<i64, u64>,
+    live_cpu_instant: HashMap<i64, u64>,
+    location_info: HashMap<i64, LocationInfo>,
+    heap_live_entries: HashMap<i64, HeapEntry>,
     cached_entries: Vec<CpuEntry>,
     cached_heap_entries: Vec<HeapEntry>,
     cached_cpu_sparklines: HashMap<i64, VecDeque<i64>>,
@@ -541,6 +552,10 @@ impl App {
             heap_sort: TableSort::default_heap(),
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
+            live_cpu_totals: HashMap::new(),
+            live_cpu_instant: HashMap::new(),
+            location_info: HashMap::new(),
+            heap_live_entries: HashMap::new(),
             cached_entries: Vec::new(),
             cached_heap_entries: Vec::new(),
             cached_cpu_sparklines: HashMap::new(),
@@ -620,6 +635,10 @@ impl App {
             heap_sort: TableSort::default_heap(),
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
+            live_cpu_totals: HashMap::new(),
+            live_cpu_instant: HashMap::new(),
+            location_info: HashMap::new(),
+            heap_live_entries: HashMap::new(),
             cached_entries: entries,
             cached_heap_entries: heap_entries,
             cached_cpu_sparklines: HashMap::new(),
@@ -769,80 +788,121 @@ impl App {
 
             // Live mode: read samples and update
             if !self.is_static() && !self.paused {
+                let mut did_checkpoint = false;
+                let mut heap_entries_map: HashMap<i64, HeapEntry> = HashMap::new();
+
                 // Prefer rsprof-trace SHM sampler (provides both CPU and heap)
-                if let (Some(shm), Some(resolver), Some(storage)) = (
-                    self.shm_heap_sampler.as_mut(),
-                    self.resolver.as_ref(),
-                    self.storage.as_mut(),
-                ) {
-                    let _events = shm.poll_events(std::time::Duration::from_millis(1));
+                if let Some(shm) = self.shm_heap_sampler.as_mut() {
+                    if let (Some(resolver), Some(storage)) =
+                        (self.resolver.as_ref(), self.storage.as_mut())
+                    {
+                        let _events = shm.poll_events(std::time::Duration::from_millis(1));
 
-                    // Process CPU samples from rsprof-trace
-                    let cpu_samples = shm.read_cpu_samples();
-                    for sample in cpu_samples {
-                        self.total_samples += 1;
-                        let location = if self.include_internal {
-                            resolve_internal_stack(&sample.stack, resolver)
-                        } else {
-                            // Walk the stack to find the first user frame (skip allocator/profiler internals)
-                            find_user_frame(&sample.stack, resolver)
-                        };
-                        if self.include_internal || !is_internal_location(&location) {
-                            storage.record_cpu_sample(
-                                sample.stack.first().copied().unwrap_or(0),
-                                &location,
-                            );
-                        }
-                    }
-
-                    // Checkpoint - record heap stats and flush
-                    if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
-                        // Record heap stats from rsprof-trace (once per checkpoint)
-                        let heap_stats = shm.read_stats();
-                        let inline_stacks = shm.read_inline_stacks();
-                        for (key_addr, stats) in heap_stats {
-                            let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                                if self.include_internal {
-                                    resolve_internal_stack(stack, resolver)
-                                } else {
-                                    find_user_frame(stack, resolver)
-                                }
-                            } else if self.include_internal {
-                                crate::symbols::Location::unknown()
+                        // Process CPU samples from rsprof-trace
+                        let cpu_samples = shm.read_cpu_samples();
+                        let live_cpu_totals = &mut self.live_cpu_totals;
+                        let live_cpu_instant = &mut self.live_cpu_instant;
+                        let location_info = &mut self.location_info;
+                        for sample in cpu_samples {
+                            self.total_samples += 1;
+                            let location = if self.include_internal {
+                                resolve_internal_stack(&sample.stack, resolver)
                             } else {
-                                resolver.resolve(key_addr)
+                                // Walk the stack to find the first user frame (skip allocator/profiler internals)
+                                find_user_frame(&sample.stack, resolver)
                             };
                             if self.include_internal || !is_internal_location(&location) {
-                                storage.record_heap_sample(
+                                let location_id = storage.record_cpu_sample(
+                                    sample.stack.first().copied().unwrap_or(0),
                                     &location,
-                                    stats.total_alloc_bytes as i64,
-                                    stats.total_free_bytes as i64,
-                                    stats.live_bytes,
-                                    stats.total_allocs,
-                                    stats.total_frees,
                                 );
+                                *live_cpu_totals.entry(location_id).or_insert(0) += 1;
+                                *live_cpu_instant.entry(location_id).or_insert(0) += 1;
+                                location_info.entry(location_id).or_insert_with(|| {
+                                    LocationInfo {
+                                        file: location.file,
+                                        line: location.line,
+                                        function: location.function,
+                                    }
+                                });
                             }
                         }
 
-                        storage.flush_checkpoint()?;
-                        self.last_checkpoint = Instant::now();
-                        self.update_sparklines();
-                        checkpointed = true;
+                        // Checkpoint - record heap stats and flush
+                        if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
+                            // Record heap stats from rsprof-trace (once per checkpoint)
+                            let heap_stats = shm.read_stats();
+                            let inline_stacks = shm.read_inline_stacks();
+                            for (key_addr, stats) in heap_stats {
+                                let location = if let Some(stack) = inline_stacks.get(&key_addr) {
+                                    if self.include_internal {
+                                        resolve_internal_stack(stack, resolver)
+                                    } else {
+                                        find_user_frame(stack, resolver)
+                                    }
+                                } else if self.include_internal {
+                                    crate::symbols::Location::unknown()
+                                } else {
+                                    resolver.resolve(key_addr)
+                                };
+                                if self.include_internal || !is_internal_location(&location) {
+                                    let location_id = storage.record_heap_sample(
+                                        &location,
+                                        stats.total_alloc_bytes as i64,
+                                        stats.total_free_bytes as i64,
+                                        stats.live_bytes,
+                                        stats.total_allocs,
+                                        stats.total_frees,
+                                    );
+                                    let entry = heap_entries_map
+                                        .entry(location_id)
+                                        .or_insert_with(|| HeapEntry {
+                                            location_id,
+                                            file: location.file,
+                                            line: location.line,
+                                            function: location.function,
+                                            live_bytes: 0,
+                                            total_alloc_bytes: 0,
+                                            total_free_bytes: 0,
+                                            alloc_count: 0,
+                                            free_count: 0,
+                                        });
+                                    entry.live_bytes += stats.live_bytes;
+                                    entry.total_alloc_bytes += stats.total_alloc_bytes as i64;
+                                    entry.total_free_bytes += stats.total_free_bytes as i64;
+                                    entry.alloc_count += stats.total_allocs;
+                                    entry.free_count += stats.total_frees;
+                                }
+                            }
+
+                            storage.flush_checkpoint()?;
+                            did_checkpoint = true;
+                        }
                     }
                 }
                 // Fallback: Use perf-based CPU sampling
-                else if let (Some(sampler), Some(resolver), Some(storage)) = (
-                    self.sampler.as_mut(),
-                    self.resolver.as_ref(),
-                    self.storage.as_mut(),
-                ) {
+                else if let (Some(sampler), Some(resolver), Some(storage)) =
+                    (self.sampler.as_mut(), self.resolver.as_ref(), self.storage.as_mut())
+                {
                     let samples = sampler.read_samples()?;
                     self.total_samples += samples.len() as u64;
 
+                    let live_cpu_totals = &mut self.live_cpu_totals;
+                    let live_cpu_instant = &mut self.live_cpu_instant;
+                    let location_info = &mut self.location_info;
                     for addr in samples {
                         let location = resolver.resolve(addr);
                         if self.include_internal || !is_internal_location(&location) {
-                            storage.record_cpu_sample(addr, &location);
+                            let location_id = storage.record_cpu_sample(addr, &location);
+                            *live_cpu_totals.entry(location_id).or_insert(0) += 1;
+                            *live_cpu_instant.entry(location_id).or_insert(0) += 1;
+                            location_info.entry(location_id).or_insert_with(|| {
+                                LocationInfo {
+                                    file: location.file,
+                                    line: location.line,
+                                    function: location.function,
+                                }
+                            });
                         }
                     }
 
@@ -864,7 +924,7 @@ impl App {
                                     resolver.resolve(key_addr)
                                 };
                                 if self.include_internal || !is_internal_location(&location) {
-                                    storage.record_heap_sample(
+                                    let location_id = storage.record_heap_sample(
                                         &location,
                                         stats.total_alloc_bytes as i64,
                                         stats.total_free_bytes as i64,
@@ -872,15 +932,45 @@ impl App {
                                         stats.total_allocs,
                                         stats.total_frees,
                                     );
+                                    let entry = heap_entries_map
+                                        .entry(location_id)
+                                        .or_insert_with(|| HeapEntry {
+                                            location_id,
+                                            file: location.file,
+                                            line: location.line,
+                                            function: location.function,
+                                            live_bytes: 0,
+                                            total_alloc_bytes: 0,
+                                            total_free_bytes: 0,
+                                            alloc_count: 0,
+                                            free_count: 0,
+                                        });
+                                    entry.live_bytes += stats.live_bytes;
+                                    entry.total_alloc_bytes += stats.total_alloc_bytes as i64;
+                                    entry.total_free_bytes += stats.total_free_bytes as i64;
+                                    entry.alloc_count += stats.total_allocs;
+                                    entry.free_count += stats.total_frees;
                                 }
                             }
                         }
 
                         storage.flush_checkpoint()?;
-                        self.last_checkpoint = Instant::now();
-                        self.update_sparklines();
-                        checkpointed = true;
+                        did_checkpoint = true;
                     }
+                }
+
+                if did_checkpoint {
+                    for (location_id, entry) in heap_entries_map {
+                        self.heap_live_entries.insert(location_id, entry);
+                    }
+                    self.last_checkpoint = Instant::now();
+                    self.refresh_cpu_entries();
+                    let heap_entries: Vec<HeapEntry> =
+                        self.heap_live_entries.values().cloned().collect();
+                    self.update_heap_entries(heap_entries);
+                    self.update_sparklines();
+                    self.live_cpu_instant.clear();
+                    checkpointed = true;
                 }
             }
 
@@ -918,12 +1008,9 @@ impl App {
                         let location_id = self.cached_entries[self.selected_row].location_id;
                         let func_name = self.cached_entries[self.selected_row].function.clone();
 
-                        if self.is_static() {
+                        self.update_selected_cpu(location_id, &func_name);
+                        if self.is_static() && self.chart_visible {
                             self.load_timeseries_static(location_id, &func_name);
-                        } else {
-                            let instant_pct =
-                                self.cached_entries[self.selected_row].instant_percent;
-                            self.update_func_history(location_id, &func_name, instant_pct);
                         }
                     }
                 }
@@ -952,9 +1039,9 @@ impl App {
                         self.scroll_offset = self.scroll_offset.min(max_scroll);
 
                         if self.selected_heap_location_id.is_none() {
-                            self.selected_heap_location_id =
-                                Some(self.cached_heap_entries[self.selected_row].location_id);
-                            self.heap_chart_cache.location_id = None;
+                            let location_id =
+                                self.cached_heap_entries[self.selected_row].location_id;
+                            self.update_selected_heap(location_id);
                         }
                     }
                 }
@@ -1047,22 +1134,22 @@ impl App {
             // gg/G - top/bottom
             KeyCode::Char('g') if self.focus == Focus::Table => {
                 self.selected_row = 0;
-                self.clear_selection_anchor();
+                self.update_selection_from_row();
                 self.ensure_selection_visible();
             }
             KeyCode::Char('G') if self.focus == Focus::Table => {
                 self.selected_row = self.active_entry_count().saturating_sub(1);
-                self.clear_selection_anchor();
+                self.update_selection_from_row();
                 self.ensure_selection_visible();
             }
             KeyCode::Home if self.focus == Focus::Table => {
                 self.selected_row = 0;
-                self.clear_selection_anchor();
+                self.update_selection_from_row();
                 self.ensure_selection_visible();
             }
             KeyCode::End if self.focus == Focus::Table => {
                 self.selected_row = self.active_entry_count().saturating_sub(1);
-                self.clear_selection_anchor();
+                self.update_selection_from_row();
                 self.ensure_selection_visible();
             }
 
@@ -1126,7 +1213,7 @@ impl App {
             self.selected_row.saturating_sub((-delta) as usize)
         };
         self.selected_row = new_row.min(entry_count.saturating_sub(1));
-        self.clear_selection_anchor();
+        self.update_selection_from_row();
         self.ensure_selection_visible();
     }
 
@@ -1134,16 +1221,6 @@ impl App {
         match self.view_mode {
             ViewMode::Cpu => self.cached_entries.len(),
             ViewMode::Memory => self.cached_heap_entries.len(),
-        }
-    }
-
-    fn clear_selection_anchor(&mut self) {
-        match self.view_mode {
-            ViewMode::Cpu => self.selected_location_id = None,
-            ViewMode::Memory => {
-                self.selected_heap_location_id = None;
-                self.heap_chart_cache.location_id = None;
-            }
         }
     }
 
@@ -1203,7 +1280,7 @@ impl App {
 
             if clicked_index < entry_count {
                 self.selected_row = clicked_index;
-                self.clear_selection_anchor();
+                self.update_selection_from_row();
             }
         }
         // Check if click is within chart area
@@ -1317,13 +1394,50 @@ impl App {
         }
     }
 
+    fn update_selected_cpu(&mut self, location_id: i64, func_name: &str) {
+        let location_changed = self.selected_location_id != Some(location_id);
+        if location_changed {
+            self.selected_location_id = Some(location_id);
+            self.selected_func_name = Some(func_name.to_string());
+            self.chart_data_cache.location_id = None;
+        }
+    }
+
+    fn update_selected_heap(&mut self, location_id: i64) {
+        let location_changed = self.selected_heap_location_id != Some(location_id);
+        if location_changed {
+            self.selected_heap_location_id = Some(location_id);
+            self.heap_chart_cache.location_id = None;
+        }
+    }
+
+    fn update_selection_from_row(&mut self) {
+        match self.view_mode {
+            ViewMode::Cpu => {
+                let entry = self
+                    .cached_entries
+                    .get(self.selected_row)
+                    .map(|e| (e.location_id, e.function.clone()));
+                if let Some((location_id, func_name)) = entry {
+                    self.update_selected_cpu(location_id, &func_name);
+                }
+            }
+            ViewMode::Memory => {
+                let entry = self
+                    .cached_heap_entries
+                    .get(self.selected_row)
+                    .map(|e| e.location_id);
+                if let Some(location_id) = entry {
+                    self.update_selected_heap(location_id);
+                }
+            }
+        }
+    }
+
     /// Update sparklines - called once per checkpoint
     /// Updates both CPU and heap sparklines separately
     fn update_sparklines(&mut self) {
         const SPARKLINE_WIDTH: usize = 12;
-
-        // Refresh entries from DB
-        self.refresh_entries();
 
         // Update CPU sparklines
         let cpu_current: HashMap<i64, i64> = self
@@ -1331,6 +1445,10 @@ impl App {
             .iter()
             .map(|e| (e.location_id, (e.instant_percent * 1000.0) as i64))
             .collect();
+
+        // Drop stale sparklines for locations no longer in the top list
+        self.cached_cpu_sparklines
+            .retain(|loc_id, _| cpu_current.contains_key(loc_id));
 
         for (loc_id, sparkline) in self.cached_cpu_sparklines.iter_mut() {
             if sparkline.len() >= SPARKLINE_WIDTH {
@@ -1356,6 +1474,10 @@ impl App {
             .map(|e| (e.location_id, e.live_bytes))
             .collect();
 
+        // Drop stale sparklines for locations no longer in the top list
+        self.cached_heap_sparklines
+            .retain(|loc_id, _| heap_current.contains_key(loc_id));
+
         for (loc_id, sparkline) in self.cached_heap_sparklines.iter_mut() {
             if sparkline.len() >= SPARKLINE_WIDTH {
                 sparkline.pop_front();
@@ -1377,12 +1499,54 @@ impl App {
         self.heap_chart_cache.location_id = None;
     }
 
-    fn refresh_entries(&mut self) {
-        if let Some(storage) = &self.storage {
-            self.cached_entries = storage.query_top_cpu_live(100);
-            self.cached_heap_entries = storage.query_top_heap_live(100);
+    fn refresh_cpu_entries(&mut self) {
+        let total_samples = self.total_samples as f64;
+        if total_samples <= 0.0 {
+            self.cached_entries.clear();
+            self.live_cpu_instant.clear();
+            return;
         }
-        self.sort_all_entries();
+
+        let instant_total: u64 = self.live_cpu_instant.values().sum();
+        let mut entries = Vec::new();
+        for (&location_id, &total) in &self.live_cpu_totals {
+            let info = self.location_info.get(&location_id);
+            let (file, line, function) = if let Some(info) = info {
+                (info.file.clone(), info.line, info.function.clone())
+            } else {
+                ("[unknown]".to_string(), 0, "[unknown]".to_string())
+            };
+
+            let instant = self.live_cpu_instant.get(&location_id).copied().unwrap_or(0);
+            entries.push(CpuEntry {
+                location_id,
+                file,
+                line,
+                function,
+                total_samples: total,
+                total_percent: (total as f64 / total_samples) * 100.0,
+                instant_percent: if instant_total > 0 {
+                    (instant as f64 / instant_total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            b.total_samples
+                .cmp(&a.total_samples)
+                .then(a.location_id.cmp(&b.location_id))
+        });
+        self.cached_entries = entries;
+        self.live_cpu_instant.clear();
+
+        self.sort_cpu_entries();
+    }
+
+    fn update_heap_entries(&mut self, entries: Vec<HeapEntry>) {
+        self.cached_heap_entries = entries;
+        self.sort_heap_entries();
     }
 
     fn sort_all_entries(&mut self) {

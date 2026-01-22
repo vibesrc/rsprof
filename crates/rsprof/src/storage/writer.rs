@@ -99,9 +99,10 @@ impl Storage {
     }
 
     /// Record a CPU sample (aggregates by location_id)
-    pub fn record_cpu_sample(&mut self, _addr: u64, location: &Location) {
+    pub fn record_cpu_sample(&mut self, _addr: u64, location: &Location) -> i64 {
         let location_id = self.get_location_id(location);
         *self.pending_cpu.entry(location_id).or_insert(0) += 1;
+        location_id
     }
 
     /// Record a heap sample (aggregates by location_id)
@@ -115,7 +116,7 @@ impl Storage {
         live_bytes: i64,
         alloc_count: u64,
         free_count: u64,
-    ) {
+    ) -> i64 {
         let location_id = self.get_location_id(location);
         let entry = self
             .pending_heap
@@ -127,6 +128,7 @@ impl Storage {
         entry.2 += live_bytes;
         entry.3 += alloc_count;
         entry.4 += free_count;
+        location_id
     }
 
     /// Flush pending data to a new checkpoint

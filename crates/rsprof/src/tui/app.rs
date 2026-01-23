@@ -324,6 +324,8 @@ pub struct ChartState {
     pub total_duration_secs: f64,
     /// Chart visualization type
     pub chart_type: ChartType,
+    /// Whether Y-axis starts from zero (false = auto-scale)
+    pub y_axis_from_zero: bool,
 }
 
 impl Default for ChartState {
@@ -333,6 +335,7 @@ impl Default for ChartState {
             pan_offset_secs: 0.0,
             total_duration_secs: 0.0,
             chart_type: ChartType::Line,
+            y_axis_from_zero: false, // Auto-scale by default
         }
     }
 }
@@ -352,6 +355,7 @@ impl ChartState {
             pan_offset_secs: 0.0,
             total_duration_secs: duration_secs,
             chart_type: ChartType::Line,
+            y_axis_from_zero: false,
         }
     }
 
@@ -361,6 +365,11 @@ impl ChartState {
             ChartType::Line => ChartType::Bar,
             ChartType::Bar => ChartType::Line,
         };
+    }
+
+    /// Toggle Y-axis between auto-scale and starting from zero
+    pub fn toggle_y_axis_zero(&mut self) {
+        self.y_axis_from_zero = !self.y_axis_from_zero;
     }
 }
 
@@ -1039,7 +1048,13 @@ impl App {
         match key {
             // Global controls
             KeyCode::Char('c') if ctrl => self.running = false,
-            KeyCode::Char('q') | KeyCode::Esc => self.running = false,
+            KeyCode::Char('q') => self.running = false,
+            KeyCode::Esc => {
+                // ESC hides the chart if visible, otherwise does nothing
+                if self.chart_visible {
+                    self.chart_visible = false;
+                }
+            }
             KeyCode::Char('p') if !self.is_static() => {
                 self.paused = !self.paused;
                 if self.paused {
@@ -1164,6 +1179,10 @@ impl App {
             // b - toggle between line and bar chart
             KeyCode::Char('b') if self.focus == Focus::Chart => {
                 self.chart_state.toggle_chart_type();
+            }
+            // z - toggle Y-axis between auto-scale and starting from zero
+            KeyCode::Char('z') if self.focus == Focus::Chart => {
+                self.chart_state.toggle_y_axis_zero();
             }
 
             _ => {}

@@ -527,7 +527,15 @@ fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area
         ChartType::Line => "line",
         ChartType::Bar => "bar",
     };
-    let title = format!(" {} [{}] ({}) ", base_title, zoom_label, chart_type_label);
+    let y_axis_label = if app.chart_state.y_axis_from_zero {
+        " y:0"
+    } else {
+        ""
+    };
+    let title = format!(
+        " {} [{}] ({}){} ",
+        base_title, zoom_label, chart_type_label, y_axis_label
+    );
 
     // Calculate chart inner width for aggregation
     let chart_inner_width = area.width.saturating_sub(12).max(1) as usize;
@@ -561,14 +569,21 @@ fn render_memory_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area
     let (y_min, y_max) = if visible_data.is_empty() {
         (0.0, 1000000.0) // Default to 1MB
     } else {
-        let min_y = visible_data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f64::MAX, f64::min);
         let max_y = visible_data.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
-        let range = (max_y - min_y).max(1.0);
-        let padding = range * 0.1;
-        ((min_y - padding).max(0.0), max_y + padding)
+        if app.chart_state.y_axis_from_zero {
+            // Start from zero
+            let padding = max_y * 0.1;
+            (0.0, max_y + padding)
+        } else {
+            // Auto-scale
+            let min_y = visible_data
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(f64::MAX, f64::min);
+            let range = (max_y - min_y).max(1.0);
+            let padding = range * 0.1;
+            ((min_y - padding).max(0.0), max_y + padding)
+        }
     };
 
     let (marker, graph_type) = match chart_type {
@@ -653,7 +668,15 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
         ChartType::Line => "line",
         ChartType::Bar => "bar",
     };
-    let title = format!(" {} [{}] ({}) ", base_title, zoom_label, chart_type_label);
+    let y_axis_label = if app.chart_state.y_axis_from_zero {
+        " y:0"
+    } else {
+        ""
+    };
+    let title = format!(
+        " {} [{}] ({}){} ",
+        base_title, zoom_label, chart_type_label, y_axis_label
+    );
 
     // Calculate chart inner width for aggregation
     // Chart layout: borders(2) + y-axis title(2) + y-axis labels(5 for "100%") + spacing(1) = ~10
@@ -689,17 +712,24 @@ fn render_line_chart(frame: &mut Frame, app: &mut App, elapsed_secs: f64, area: 
     let (y_min, y_max) = if visible_data.is_empty() {
         (0.0, 100.0)
     } else {
-        let min_y = visible_data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f64::MAX, f64::min);
         let max_y = visible_data.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
-        let range = (max_y - min_y).max(1.0);
-        let padding = range * 0.1;
-        (
-            ((min_y - padding).max(0.0) / 5.0).floor() * 5.0,
-            ((max_y + padding) / 5.0).ceil() * 5.0,
-        )
+        if app.chart_state.y_axis_from_zero {
+            // Start from zero, round max to nice number
+            let padding = max_y * 0.1;
+            (0.0, ((max_y + padding) / 5.0).ceil() * 5.0)
+        } else {
+            // Auto-scale
+            let min_y = visible_data
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(f64::MAX, f64::min);
+            let range = (max_y - min_y).max(1.0);
+            let padding = range * 0.1;
+            (
+                ((min_y - padding).max(0.0) / 5.0).floor() * 5.0,
+                ((max_y + padding) / 5.0).ceil() * 5.0,
+            )
+        }
     };
 
     let (marker, graph_type) = match chart_type {
@@ -848,6 +878,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     // Context-sensitive help based on chart visibility and focus
     if app.chart_visible {
+        spans.push(Span::styled(" Esc ", Style::default().bg(Color::DarkGray)));
+        spans.push(Span::raw(" hide "));
         spans.push(Span::styled(" Tab ", Style::default().bg(Color::DarkGray)));
         spans.push(Span::raw(" focus "));
 
@@ -859,6 +891,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw(" pan "));
             spans.push(Span::styled(" +/- ", Style::default().bg(Color::DarkGray)));
             spans.push(Span::raw(" zoom "));
+            spans.push(Span::styled(" b ", Style::default().bg(Color::DarkGray)));
+            spans.push(Span::raw(" bar/line "));
+            spans.push(Span::styled(" z ", Style::default().bg(Color::DarkGray)));
+            spans.push(Span::raw(" y:0 "));
         }
     } else {
         // Table-only mode

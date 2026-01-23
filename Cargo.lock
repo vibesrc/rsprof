@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "rsprof"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -804,7 +804,6 @@ dependencies = [
  "nix 0.29.0",
  "object",
  "ratatui",
- "rsprof-trace",
  "rusqlite",
  "rustc-demangle",
  "thiserror",
@@ -812,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "rsprof-trace"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "libc",
 ]

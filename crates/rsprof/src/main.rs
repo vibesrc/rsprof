@@ -4,10 +4,6 @@ use rsprof::cli::{Cli, Command};
 use rsprof::error::exit_code;
 use std::process::ExitCode;
 
-// Enable self-profiling (rsprof-ception) when built with --features self-profile.
-#[cfg(feature = "self-profile")]
-rsprof_trace::profiler!();
-
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::from(exit_code::SUCCESS as u8),

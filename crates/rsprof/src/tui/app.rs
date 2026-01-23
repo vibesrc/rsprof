@@ -528,6 +528,8 @@ pub struct App {
     pub view_mode: ViewMode,
     // Chart visibility (false = full-width table with sparklines)
     pub chart_visible: bool,
+    // Time offset for append mode (seconds from previous recording)
+    time_offset_secs: f64,
 }
 
 impl App {
@@ -541,7 +543,45 @@ impl App {
         checkpoint_interval: Duration,
         max_duration: Option<Duration>,
         include_internal: bool,
+        time_offset_secs: f64,
     ) -> Self {
+        let mut chart_state = ChartState::default();
+        // If appending, set initial duration to the offset so chart shows historical range
+        if time_offset_secs > 0.0 {
+            chart_state.total_duration_secs = time_offset_secs;
+        }
+
+        // Pre-load existing data when appending
+        let (cached_entries, cached_heap_entries, total_samples) = if time_offset_secs > 0.0 {
+            let cpu_entries = storage.query_top_cpu_live(1000);
+            let heap_entries = storage.query_top_heap_live(100);
+            let samples = storage.total_samples().unwrap_or(0);
+            (cpu_entries, heap_entries, samples)
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
+
+        // Build location_info and live_cpu_totals from pre-loaded entries
+        let mut location_info = HashMap::new();
+        let mut live_cpu_totals = HashMap::new();
+        for entry in &cached_entries {
+            location_info.insert(
+                entry.location_id,
+                LocationInfo {
+                    file: entry.file.clone(),
+                    line: entry.line,
+                    function: entry.function.clone(),
+                },
+            );
+            live_cpu_totals.insert(entry.location_id, entry.total_samples);
+        }
+
+        // Build heap_live_entries from pre-loaded entries
+        let mut heap_live_entries = HashMap::new();
+        for entry in &cached_heap_entries {
+            heap_live_entries.insert(entry.location_id, entry.clone());
+        }
+
         App {
             sampler: perf_sampler,
             shm_heap_sampler: shm_sampler,
@@ -552,7 +592,7 @@ impl App {
             max_duration,
             start_time: Instant::now(),
             last_checkpoint: Instant::now(),
-            total_samples: 0,
+            total_samples,
             running: true,
             paused: false,
             paused_elapsed: None,
@@ -568,27 +608,28 @@ impl App {
             heap_sort: TableSort::default_heap(),
             func_history: Vec::new(),
             last_history_tick: Instant::now(),
-            live_cpu_totals: HashMap::new(),
+            live_cpu_totals,
             live_cpu_instant: HashMap::new(),
-            location_info: HashMap::new(),
+            location_info,
             cpu_last_seen: HashMap::new(),
-            heap_live_entries: HashMap::new(),
+            heap_live_entries,
             heap_last_seen: HashMap::new(),
             chart_checkpoint_seq: 0,
-            cached_entries: Vec::new(),
-            cached_heap_entries: Vec::new(),
+            cached_entries,
+            cached_heap_entries,
             cached_cpu_sparklines: HashMap::new(),
             cached_heap_sparklines: HashMap::new(),
             table_area: Rect::default(),
             chart_area: Rect::default(),
             chart_data_cache: ChartDataCache::default(),
             heap_chart_cache: HeapChartCache::default(),
-            chart_state: ChartState::default(),
+            chart_state,
             focus: Focus::Table,
             static_duration_secs: 0.0,
             file_name: None,
             view_mode: ViewMode::default(),
             chart_visible: false, // Hidden by default, sparklines show in table
+            time_offset_secs,
         }
     }
 
@@ -675,7 +716,8 @@ impl App {
             static_duration_secs: duration_secs,
             file_name,
             view_mode: ViewMode::default(),
-            chart_visible: false, // Hidden by default
+            chart_visible: false,  // Hidden by default
+            time_offset_secs: 0.0, // Static mode has no offset
         };
 
         app.sort_all_entries();
@@ -948,8 +990,10 @@ impl App {
             }
 
             // Update chart duration each frame for smooth zoom bounds
+            // Include time_offset_secs for append mode to show historical data
             if !self.is_static() {
-                self.chart_state.total_duration_secs = self.start_time.elapsed().as_secs_f64();
+                self.chart_state.total_duration_secs =
+                    self.start_time.elapsed().as_secs_f64() + self.time_offset_secs;
             }
 
             // Update selection state
@@ -1838,14 +1882,14 @@ impl App {
         }
     }
 
-    /// Get elapsed seconds as f64
+    /// Get elapsed seconds as f64 (includes time offset for append mode)
     pub fn elapsed_secs(&self) -> f64 {
         if self.is_static() {
             self.static_duration_secs
         } else if let Some(elapsed) = self.paused_elapsed {
-            elapsed.as_secs_f64()
+            elapsed.as_secs_f64() + self.time_offset_secs
         } else {
-            self.start_time.elapsed().as_secs_f64()
+            self.start_time.elapsed().as_secs_f64() + self.time_offset_secs
         }
     }
 

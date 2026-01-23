@@ -55,31 +55,7 @@ profile: release
 		exit 1; \
 	fi; \
 	echo "Profiling example_app (PID $$PID) for $(PROFILE_DURATION)..."; \
-	./target/release/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
-
-# Attach to running example_app in this terminal
-profile-profile: build-profiler
-	@PID=$$(pgrep -x example_app 2>/dev/null); \
-	if [ -z "$$PID" ]; then \
-		echo "Error: example_app is not running."; \
-		echo "Start it first with: make example"; \
-		exit 1; \
-	fi; \
-	echo "Attaching rsprof to example_app (PID $$PID)..."; \
-	./target/profiling/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
-
-# Attach to running rsprof in this terminal (set RSPROF_PID if multiple)
-PROFILER_OUTPUT ?= profiler.db
-profile-profiler: build-profiler
-	@PID=$${RSPROF_PID:-$$(pgrep -n rsprof 2>/dev/null)}; \
-	if [ -z "$$PID" ]; then \
-		echo "Error: rsprof is not running."; \
-		echo "Start it first with: make profile-profile"; \
-		echo "If multiple rsprof are running, set RSPROF_PID=<pid>."; \
-		exit 1; \
-	fi; \
-	echo "Attaching rsprof to rsprof (PID $$PID)..."; \
-	./target/profiling/rsprof --pid $$PID --include-internal -o $(PROFILER_OUTPUT)
+	./target/release/rsprof --pid $$PID -o $(PROFILE_OUTPUT) --append
 
 # View the last profile
 top-cpu:

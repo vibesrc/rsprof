@@ -67,6 +67,37 @@ pub fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Get the last checkpoint timestamp (for append mode)
+pub fn get_last_checkpoint_timestamp(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT timestamp_ms FROM checkpoints ORDER BY timestamp_ms DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Load all locations into a cache (for append mode)
+pub fn load_location_cache(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<(String, u32, String), i64>> {
+    let mut stmt = conn.prepare("SELECT id, file, line, function FROM locations")?;
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        let file: String = row.get(1)?;
+        let line: i64 = row.get(2)?;
+        let function: String = row.get(3)?;
+        Ok((id, file, line as u32, function))
+    })?;
+
+    let mut cache = std::collections::HashMap::new();
+    for row in rows {
+        let (id, file, line, function) = row?;
+        cache.insert((file, line, function), id);
+    }
+    Ok(cache)
+}
+
 /// Set a metadata key
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     conn.execute(

@@ -2,7 +2,30 @@ use anyhow::Context;
 use clap::Parser;
 use rsprof::cli::{Cli, Command};
 use rsprof::error::exit_code;
+use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// Find the most recent profile file for a process name
+fn find_latest_profile(proc_name: &str) -> Option<PathBuf> {
+    let pattern = format!("rsprof.{}.", proc_name);
+    let mut candidates: Vec<_> = std::fs::read_dir(".")
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&pattern) && name.ends_with(".db")
+        })
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), mtime))
+        })
+        .collect();
+
+    // Sort by modification time, most recent first
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.into_iter().next().map(|(path, _)| path)
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -94,11 +117,24 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
     );
 
     // Determine output path
-    let output_path = cli.output.clone().unwrap_or_else(|| {
+    let output_path = if let Some(ref path) = cli.output {
+        path.clone()
+    } else if cli.append {
+        // Find most recent profile for this process
+        find_latest_profile(proc_info.name()).unwrap_or_else(|| {
+            let timestamp = chrono::Local::now().format("%y%m%d%H%M%S");
+            std::path::PathBuf::from(format!("rsprof.{}.{}.db", proc_info.name(), timestamp))
+        })
+    } else {
         let timestamp = chrono::Local::now().format("%y%m%d%H%M%S");
         std::path::PathBuf::from(format!("rsprof.{}.{}.db", proc_info.name(), timestamp))
-    });
-    eprintln!("Output: {}", output_path.display());
+    };
+    let append_mode = cli.append && output_path.exists();
+    if append_mode {
+        eprintln!("Appending to: {}", output_path.display());
+    } else {
+        eprintln!("Output: {}", output_path.display());
+    }
 
     // Load symbols
     eprintln!("Loading debug symbols...");
@@ -110,7 +146,11 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
     eprintln!("ASLR offset: 0x{:x}", resolver.aslr_offset());
 
     // Initialize storage
-    let storage = rsprof::storage::Storage::new(&output_path, &proc_info, cli.cpu_freq)?;
+    let storage = if append_mode {
+        rsprof::storage::Storage::open_append(&output_path)?
+    } else {
+        rsprof::storage::Storage::new(&output_path, &proc_info, cli.cpu_freq)?
+    };
 
     // Try to initialize shared memory sampler (rsprof-trace) first
     // This provides both CPU and heap profiling from self-instrumented targets

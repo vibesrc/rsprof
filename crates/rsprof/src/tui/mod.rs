@@ -21,6 +21,7 @@ pub fn run(
     max_duration: Option<Duration>,
     include_internal: bool,
 ) -> Result<()> {
+    let time_offset_secs = storage.time_offset_secs();
     let mut app = App::new(
         perf_sampler,
         shm_sampler,
@@ -29,6 +30,7 @@ pub fn run(
         checkpoint_interval,
         max_duration,
         include_internal,
+        time_offset_secs,
     );
     app.run()
 }

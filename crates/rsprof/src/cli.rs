@@ -41,6 +41,10 @@ pub struct Cli {
     /// Include internal/profiler frames in recording
     #[arg(long)]
     pub include_internal: bool,
+
+    /// Append to the most recent profile for this process instead of creating a new one
+    #[arg(long, short = 'a')]
+    pub append: bool,
 }
 
 #[derive(Subcommand, Debug)]

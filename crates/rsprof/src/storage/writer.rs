@@ -17,6 +17,8 @@ type HeapSampleData = (i64, i64, i64, u64, u64);
 pub struct Storage {
     conn: Connection,
     start_time: Instant,
+    /// Offset to add to timestamps when appending to existing profile
+    time_offset_ms: i64,
     checkpoint_id: i64,
     /// Pending CPU samples: location_id -> count
     pending_cpu: HashMap<i64, u64>,
@@ -58,10 +60,41 @@ impl Storage {
         Ok(Storage {
             conn,
             start_time: Instant::now(),
+            time_offset_ms: 0,
             checkpoint_id: 0,
             pending_cpu: HashMap::new(),
             pending_heap: HashMap::new(),
             location_cache: HashMap::new(),
+        })
+    }
+
+    /// Open an existing storage file in append mode
+    /// Loads the existing location cache and continues from the last checkpoint timestamp
+    pub fn open_append(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+
+        // Enable WAL mode
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;",
+        )?;
+
+        // Load existing location cache
+        let location_cache = schema::load_location_cache(&conn)?;
+        eprintln!("Loaded {} existing locations", location_cache.len());
+
+        // Get last checkpoint timestamp to calculate offset
+        let last_timestamp_ms = schema::get_last_checkpoint_timestamp(&conn)?.unwrap_or(0);
+        eprintln!("Continuing from timestamp {}ms", last_timestamp_ms);
+
+        Ok(Storage {
+            conn,
+            start_time: Instant::now(),
+            time_offset_ms: last_timestamp_ms,
+            checkpoint_id: 0,
+            pending_cpu: HashMap::new(),
+            pending_heap: HashMap::new(),
+            location_cache,
         })
     }
 
@@ -146,8 +179,8 @@ impl Storage {
 
         let tx = self.conn.transaction()?;
 
-        // Create checkpoint
-        let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
+        // Create checkpoint (add time offset for append mode)
+        let timestamp_ms = self.start_time.elapsed().as_millis() as i64 + self.time_offset_ms;
         tx.execute(
             "INSERT INTO checkpoints (timestamp_ms) VALUES (?)",
             [timestamp_ms],
@@ -209,6 +242,12 @@ impl Storage {
             .conn
             .query_row("SELECT COUNT(*) FROM checkpoints", [], |row| row.get(0))?;
         Ok(count as u64)
+    }
+
+    /// Get the time offset in seconds (for append mode)
+    /// Returns 0 for new profiles, or the last checkpoint timestamp for appended profiles
+    pub fn time_offset_secs(&self) -> f64 {
+        self.time_offset_ms as f64 / 1000.0
     }
 
     /// Query top CPU consumers with both total and instant percentages

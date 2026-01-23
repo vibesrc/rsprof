@@ -3,7 +3,7 @@ mod ui;
 
 use crate::cpu::CpuSampler;
 use crate::error::Result;
-use crate::heap::{HeapSampler, ShmHeapSampler};
+use crate::heap::ShmHeapSampler;
 use crate::storage::Storage;
 use crate::symbols::SymbolResolver;
 use std::time::Duration;
@@ -14,7 +14,6 @@ pub use app::App;
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     perf_sampler: Option<CpuSampler>,
-    heap_sampler: Option<HeapSampler>,
     shm_sampler: Option<ShmHeapSampler>,
     resolver: SymbolResolver,
     storage: Storage,
@@ -24,7 +23,6 @@ pub fn run(
 ) -> Result<()> {
     let mut app = App::new(
         perf_sampler,
-        heap_sampler,
         shm_sampler,
         resolver,
         storage,

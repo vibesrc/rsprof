@@ -142,27 +142,10 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
         None // Don't need perf when we have rsprof-trace
     };
 
-    // Try eBPF heap sampler as fallback (requires root/CAP_BPF)
-    let heap_sampler = if shm_sampler.is_none() {
-        match rsprof::heap::HeapSampler::new(pid, proc_info.exe_path()) {
-            Ok(hs) => {
-                eprintln!("Heap profiling enabled (eBPF uprobes)");
-                Some(hs)
-            }
-            Err(e) => {
-                eprintln!("Heap profiling disabled: {}", e);
-                None
-            }
-        }
-    } else {
-        None // Don't need eBPF when we have rsprof-trace
-    };
-
     // Run profiler
     if cli.quiet {
         run_headless(
             perf_sampler,
-            heap_sampler,
             shm_sampler,
             resolver,
             storage,
@@ -173,7 +156,6 @@ fn run_profiler(cli: &Cli) -> anyhow::Result<()> {
     } else {
         rsprof::tui::run(
             perf_sampler,
-            heap_sampler,
             shm_sampler,
             resolver,
             storage,
@@ -391,7 +373,6 @@ fn find_user_frame(
 #[allow(clippy::too_many_arguments)]
 fn run_headless(
     mut perf_sampler: Option<rsprof::cpu::CpuSampler>,
-    heap_sampler: Option<rsprof::heap::HeapSampler>,
     mut shm_sampler: Option<rsprof::heap::ShmHeapSampler>,
     resolver: rsprof::symbols::SymbolResolver,
     mut storage: rsprof::storage::Storage,
@@ -470,39 +451,6 @@ fn run_headless(
             if let Some(ref shm) = shm_sampler {
                 let heap_stats = shm.read_stats();
                 let inline_stacks = shm.read_inline_stacks();
-                total_heap_events = heap_stats.len() as u64;
-
-                for (key_addr, stats) in heap_stats {
-                    let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                        if include_internal {
-                            resolve_internal_stack(stack, &resolver)
-                        } else {
-                            find_user_frame(stack, &resolver)
-                        }
-                    } else if include_internal {
-                        rsprof::symbols::Location::unknown()
-                    } else {
-                        resolver.resolve(key_addr)
-                    };
-                    if include_internal || !is_internal_location(&location) {
-                        storage.record_heap_sample(
-                            &location,
-                            stats.total_alloc_bytes as i64,
-                            stats.total_free_bytes as i64,
-                            stats.live_bytes,
-                            stats.total_allocs,
-                            stats.total_frees,
-                        );
-                    }
-                }
-            }
-
-            // Record heap stats from eBPF sampler (fallback)
-            if shm_sampler.is_none()
-                && let Some(ref hs) = heap_sampler
-            {
-                let heap_stats = hs.read_stats();
-                let inline_stacks = hs.read_inline_stacks();
                 total_heap_events = heap_stats.len() as u64;
 
                 for (key_addr, stats) in heap_stats {

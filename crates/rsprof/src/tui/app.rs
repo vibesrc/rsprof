@@ -1,6 +1,6 @@
 use crate::cpu::CpuSampler;
 use crate::error::Result;
-use crate::heap::{HeapSampler, ShmHeapSampler};
+use crate::heap::ShmHeapSampler;
 use crate::storage::{CpuEntry, HeapEntry, Storage, query_cpu_timeseries_aggregated};
 use crate::symbols::SymbolResolver;
 use crossterm::{
@@ -461,7 +461,6 @@ impl ChartState {
 pub struct App {
     // Live mode components (None in static/view mode)
     sampler: Option<CpuSampler>,
-    heap_sampler: Option<HeapSampler>,
     shm_heap_sampler: Option<ShmHeapSampler>,
     resolver: Option<SymbolResolver>,
     storage: Option<Storage>,
@@ -523,7 +522,6 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         perf_sampler: Option<CpuSampler>,
-        heap_sampler: Option<HeapSampler>,
         shm_sampler: Option<ShmHeapSampler>,
         resolver: SymbolResolver,
         storage: Storage,
@@ -533,7 +531,6 @@ impl App {
     ) -> Self {
         App {
             sampler: perf_sampler,
-            heap_sampler,
             shm_heap_sampler: shm_sampler,
             resolver: Some(resolver),
             storage: Some(storage),
@@ -619,7 +616,6 @@ impl App {
 
         let mut app = App {
             sampler: None,
-            heap_sampler: None,
             shm_heap_sampler: None,
             resolver: None,
             storage: None,
@@ -687,24 +683,9 @@ impl App {
         self.file_name.as_deref()
     }
 
-    /// Enable heap profiling (requires the 'heap' feature and CAP_BPF)
-    pub fn enable_heap_profiling(&mut self, exe_path: &std::path::Path, pid: u32) -> Result<()> {
-        match HeapSampler::new(pid, exe_path) {
-            Ok(sampler) => {
-                self.heap_sampler = Some(sampler);
-                Ok(())
-            }
-            Err(e) => {
-                // Log warning but don't fail - heap profiling is optional
-                eprintln!("Warning: Heap profiling unavailable: {}", e);
-                Err(e)
-            }
-        }
-    }
-
     /// Check if heap profiling is active
     pub fn has_heap_profiling(&self) -> bool {
-        self.heap_sampler.is_some() || self.shm_heap_sampler.is_some()
+        self.shm_heap_sampler.is_some()
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -924,54 +905,6 @@ impl App {
                     }
 
                     if self.last_checkpoint.elapsed() >= self.checkpoint_interval {
-                        // Record heap stats from eBPF sampler (once per checkpoint)
-                        if let Some(hs) = self.heap_sampler.as_ref() {
-                            let heap_stats = hs.read_stats();
-                            let inline_stacks = hs.read_inline_stacks();
-                            for (key_addr, stats) in heap_stats {
-                                let location = if let Some(stack) = inline_stacks.get(&key_addr) {
-                                    if self.include_internal {
-                                        resolve_internal_stack(stack, resolver)
-                                    } else {
-                                        find_user_frame(stack, resolver)
-                                    }
-                                } else if self.include_internal {
-                                    crate::symbols::Location::unknown()
-                                } else {
-                                    resolver.resolve(key_addr)
-                                };
-                                if self.include_internal || !is_internal_location(&location) {
-                                    let location_id = storage.record_heap_sample(
-                                        &location,
-                                        stats.total_alloc_bytes as i64,
-                                        stats.total_free_bytes as i64,
-                                        stats.live_bytes,
-                                        stats.total_allocs,
-                                        stats.total_frees,
-                                    );
-                                    let entry =
-                                        heap_entries_map.entry(location_id).or_insert_with(|| {
-                                            HeapEntry {
-                                                location_id,
-                                                file: location.file,
-                                                line: location.line,
-                                                function: location.function,
-                                                live_bytes: 0,
-                                                total_alloc_bytes: 0,
-                                                total_free_bytes: 0,
-                                                alloc_count: 0,
-                                                free_count: 0,
-                                            }
-                                        });
-                                    entry.live_bytes += stats.live_bytes;
-                                    entry.total_alloc_bytes += stats.total_alloc_bytes as i64;
-                                    entry.total_free_bytes += stats.total_free_bytes as i64;
-                                    entry.alloc_count += stats.total_allocs;
-                                    entry.free_count += stats.total_frees;
-                                }
-                            }
-                        }
-
                         storage.flush_checkpoint()?;
                         did_checkpoint = true;
                     }

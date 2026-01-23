@@ -142,7 +142,7 @@ impl ShmHeapSampler {
             let fd = libc::shm_open(shm_path.as_ptr(), libc::O_RDONLY, 0);
 
             if fd < 0 {
-                return Err(Error::Bpf(format!(
+                return Err(Error::Sampler(format!(
                     "Failed to open shared memory '{}'. Is the target app using rsprof-trace with profiling feature?",
                     SHM_PATH
                 )));
@@ -161,7 +161,7 @@ impl ShmHeapSampler {
             libc::close(fd);
 
             if ptr == libc::MAP_FAILED {
-                return Err(Error::Bpf("Failed to map shared memory".to_string()));
+                return Err(Error::Sampler("Failed to map shared memory".to_string()));
             }
 
             let mmap = ptr as *mut u8;
@@ -171,7 +171,7 @@ impl ShmHeapSampler {
 
             if header.magic != MAGIC {
                 libc::munmap(ptr, buffer_size);
-                return Err(Error::Bpf(format!(
+                return Err(Error::Sampler(format!(
                     "Invalid shared memory magic: expected 0x{:x}, got 0x{:x}",
                     MAGIC, header.magic
                 )));

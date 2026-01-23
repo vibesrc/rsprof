@@ -17,8 +17,8 @@ pub enum Error {
     #[error("perf_event error: {0}")]
     PerfEvent(String),
 
-    #[error("eBPF error: {0}")]
-    Bpf(String),
+    #[error("Sampler error: {0}")]
+    Sampler(String),
 
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),

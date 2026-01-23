@@ -1,4 +1,4 @@
-.PHONY: build release test clean target run-target profile help profile-profile profile-profiler build-profiler
+.PHONY: build release test clean example profile help profile-profile profile-profiler build-profiler
 
 # Default target
 help:
@@ -8,16 +8,15 @@ help:
 	@echo "  make build        Build debug version"
 	@echo "  make release      Build release version"
 	@echo "  make test         Run tests"
-	@echo "  make target       Build the example target app (profiling profile)"
-	@echo "  make run-target   Run the example target app"
-	@echo "  make profile      Profile the target app for 10s (manual run)"
-	@echo "  make profile-profile   Run rsprof in this terminal (attaches to running target_app)"
+	@echo "  make example      Build and run the example app (profiling profile)"
+	@echo "  make profile      Profile the example app for 10s (manual run)"
+	@echo "  make profile-profile   Run rsprof in this terminal (attaches to running example_app)"
 	@echo "  make profile-profiler  Run rsprof in this terminal (attaches to running rsprof)"
 	@echo "  make clean        Clean build artifacts"
 	@echo ""
 	@echo "Quick start:"
-	@echo "  make release target"
-	@echo "  make run-target   # In terminal 1"
+	@echo "  make release example"
+	@echo "  make example      # In terminal 1"
 	@echo "  make profile      # In terminal 2"
 
 # Build targets
@@ -37,38 +36,36 @@ clean:
 	cargo clean
 	rm -f rsprof.*.db
 
-# Example target app - profiling build with frame pointers
-build-target:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling -p rsprof --example target_app
+# Example app - profiling build with frame pointers
+build-example:
+	cd example && cargo build --profile profiling
 
-target: build-target
-	./target/profiling/examples/target_app
+example: build-example
+	./example/target/profiling/example_app
 
-run-target: target
-
-# Profile the running target app
+# Profile the running example app
 PROFILE_DURATION ?= 10s
 PROFILE_OUTPUT ?= profile.db
 
 profile: release
-	@PID=$$(pgrep -x target_app 2>/dev/null); \
+	@PID=$$(pgrep -x example_app 2>/dev/null); \
 	if [ -z "$$PID" ]; then \
-		echo "Error: target_app is not running."; \
-		echo "Start it first with: make run-target"; \
+		echo "Error: example_app is not running."; \
+		echo "Start it first with: make example"; \
 		exit 1; \
 	fi; \
-	echo "Profiling target_app (PID $$PID) for $(PROFILE_DURATION)..."; \
+	echo "Profiling example_app (PID $$PID) for $(PROFILE_DURATION)..."; \
 	./target/release/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
 
-# Attach to running target_app in this terminal
+# Attach to running example_app in this terminal
 profile-profile: build-profiler
-	@PID=$$(pgrep -x target_app 2>/dev/null); \
+	@PID=$$(pgrep -x example_app 2>/dev/null); \
 	if [ -z "$$PID" ]; then \
-		echo "Error: target_app is not running."; \
-		echo "Start it first with: make target"; \
+		echo "Error: example_app is not running."; \
+		echo "Start it first with: make example"; \
 		exit 1; \
 	fi; \
-	echo "Attaching rsprof to target_app (PID $$PID)..."; \
+	echo "Attaching rsprof to example_app (PID $$PID)..."; \
 	./target/profiling/rsprof --pid $$PID -o $(PROFILE_OUTPUT)
 
 # Attach to running rsprof in this terminal (set RSPROF_PID if multiple)
@@ -119,8 +116,8 @@ view:
 
 # Quick demo: build everything, run target in background, profile, show results
 demo: release target
-	@echo "Starting target_app in background..."
-	@./target/profiling/examples/target_app & \
+	@echo "Starting example_app in background..."
+	@./example_app/target/profiling/example_app & \
 	APP_PID=$$!; \
 	sleep 2; \
 	echo "Profiling for 5 seconds..."; \

@@ -1,0 +1,13 @@
+[package]
+name = "example_app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rsprof-trace = { path = "../crates/rsprof-trace", features = ["profiling"] }
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[workspace]

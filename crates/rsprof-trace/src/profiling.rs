@@ -575,7 +575,7 @@ mod cpu_profiling {
         unsafe {
             // Set up signal handler for SIGPROF with SA_SIGINFO to get ucontext
             let mut sa: libc::sigaction = core::mem::zeroed();
-            sa.sa_sigaction = cpu_sample_handler as usize;
+            sa.sa_sigaction = cpu_sample_handler as *const () as usize;
             sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
             libc::sigemptyset(&mut sa.sa_mask);
 

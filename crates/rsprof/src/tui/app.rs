@@ -475,7 +475,9 @@ pub struct App {
     total_samples: u64,
     running: bool,
     paused: bool,
+    paused_elapsed: Option<Duration>,
     last_draw: Instant,
+    last_click: Option<(Instant, u16, u16)>,
     include_internal: bool,
 
     // Selection state
@@ -543,7 +545,9 @@ impl App {
             total_samples: 0,
             running: true,
             paused: false,
+            paused_elapsed: None,
             last_draw: Instant::now(),
+            last_click: None,
             include_internal,
             selected_row: 0,
             scroll_offset: 0,
@@ -627,7 +631,9 @@ impl App {
             total_samples: total_samples as u64,
             running: true,
             paused: true, // Static mode is always "paused"
+            paused_elapsed: None,
             last_draw: Instant::now(),
+            last_click: None,
             include_internal: false,
             selected_row: 0,
             scroll_offset: 0,
@@ -756,7 +762,11 @@ impl App {
                         let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
                         match mouse.kind {
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                self.handle_click(mouse.column, mouse.row);
+                                if self.is_double_click(mouse.column, mouse.row) {
+                                    self.chart_visible = !self.chart_visible;
+                                } else {
+                                    self.handle_click(mouse.column, mouse.row);
+                                }
                                 needs_redraw = true;
                             }
                             MouseEventKind::ScrollUp => {
@@ -1088,7 +1098,14 @@ impl App {
             // Global controls
             KeyCode::Char('c') if ctrl => self.running = false,
             KeyCode::Char('q') | KeyCode::Esc => self.running = false,
-            KeyCode::Char('p') if !self.is_static() => self.paused = !self.paused,
+            KeyCode::Char('p') if !self.is_static() => {
+                self.paused = !self.paused;
+                if self.paused {
+                    self.paused_elapsed = Some(self.start_time.elapsed());
+                } else {
+                    self.paused_elapsed = None;
+                }
+            }
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Table => Focus::Chart,
@@ -1298,6 +1315,23 @@ impl App {
         {
             self.focus = Focus::Chart;
         }
+    }
+
+    fn is_double_click(&mut self, x: u16, y: u16) -> bool {
+        let now = Instant::now();
+        let is_double = self
+            .last_click
+            .map(|(last_time, last_x, last_y)| {
+                now.duration_since(last_time) <= Duration::from_millis(400)
+                    && last_x == x
+                    && last_y == y
+            })
+            .unwrap_or(false);
+        self.last_click = Some((now, x, y));
+        if is_double {
+            self.last_click = None;
+        }
+        is_double
     }
 
     // Getters for UI
@@ -1788,6 +1822,8 @@ impl App {
     pub fn elapsed(&self) -> Duration {
         if self.is_static() {
             Duration::from_secs_f64(self.static_duration_secs)
+        } else if let Some(elapsed) = self.paused_elapsed {
+            elapsed
         } else {
             self.start_time.elapsed()
         }
@@ -1797,6 +1833,8 @@ impl App {
     pub fn elapsed_secs(&self) -> f64 {
         if self.is_static() {
             self.static_duration_secs
+        } else if let Some(elapsed) = self.paused_elapsed {
+            elapsed.as_secs_f64()
         } else {
             self.start_time.elapsed().as_secs_f64()
         }

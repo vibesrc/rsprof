@@ -36,6 +36,17 @@ impl Location {
     pub fn simplified_file(&self) -> String {
         simplify_path(&self.file)
     }
+
+    /// Get a shortened function name for display (last 2 segments).
+    ///
+    /// Examples:
+    /// - `example_app::buffer_pool::DepthPool::depth_4_level_a` -> `DepthPool::depth_4_level_a`
+    /// - `example_app::main` -> `main`
+    /// - `Vec<T>::push` -> `Vec<T>::push`
+    /// - `<Type as Trait>::method` -> `<Type as Trait>::method`
+    pub fn short_name(&self) -> &str {
+        shorten_function_name(&self.function)
+    }
 }
 
 /// Symbol resolver using DWARF debug info
@@ -344,4 +355,81 @@ fn simplify_path(path: &str) -> String {
     }
 
     result
+}
+
+/// Shorten a fully-qualified function name for display.
+///
+/// Returns just the function name, unless it's a method on a type,
+/// in which case it returns `Type::method`.
+///
+/// Examples:
+/// - `app::mod::Struct::method` -> `Struct::method` (method on type)
+/// - `app::buffer_pool::free_fn` -> `free_fn` (free function)
+/// - `app::main` -> `main`
+/// - `<Vec<T> as Trait>::method` -> `<Vec<T> as Trait>::method` (trait impl)
+/// - `app::Struct::method::{{closure}}` -> `method::{{closure}}`
+pub fn shorten_function_name(name: &str) -> &str {
+    // Handle special markers
+    if name.starts_with('[') || name.is_empty() {
+        return name;
+    }
+
+    // If it starts with '<', it's a trait impl - keep the whole thing
+    // e.g., `<Type as Trait>::method`
+    if name.starts_with('<') {
+        return name;
+    }
+
+    // Find segments by splitting on `::`
+    // But we need to be careful about generics like `Vec<T>::push`
+    // The strategy: walk finding `::` that aren't inside `<>`
+    let bytes = name.as_bytes();
+    let mut depth = 0i32;
+    let mut segment_starts: Vec<usize> = vec![0];
+
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => depth += 1,
+            b'>' => depth -= 1,
+            b':' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b':' => {
+                // Found a `::` at depth 0
+                segment_starts.push(i + 2);
+                i += 1; // skip the second `:`
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let num_segments = segment_starts.len();
+    if num_segments <= 1 {
+        return name;
+    }
+
+    // Get the last segment
+    let last_start = segment_starts[num_segments - 1];
+    let last_segment = &name[last_start..];
+
+    // If only 2 segments, return last segment only (it's a free function)
+    if num_segments == 2 {
+        return last_segment;
+    }
+
+    // Check if second-to-last segment is a type (PascalCase) or a method/closure
+    let second_last_start = segment_starts[num_segments - 2];
+    let second_last_end = segment_starts[num_segments - 1] - 2; // before the `::`
+    let second_last = &name[second_last_start..second_last_end];
+
+    // If second-to-last starts with uppercase or is a closure, include it
+    // PascalCase types: DepthPool, Vec, HashMap
+    // Closures: {{closure}}
+    let first_char = second_last.chars().next().unwrap_or('a');
+    if first_char.is_ascii_uppercase() || second_last.starts_with('{') {
+        // Return Type::method or method::{{closure}}
+        return &name[second_last_start..];
+    }
+
+    // Otherwise just return the function name
+    last_segment
 }

@@ -10,4 +10,7 @@ rsprof-trace = { path = "../crates/rsprof-trace", features = ["profiling"] }
 inherits = "release"
 debug = true
 
+[profile.release]
+debug = true
+
 [workspace]

@@ -406,19 +406,22 @@ fn run_headless(
         if let Some(ref mut shm) = shm_sampler {
             let _events = shm.poll_events(std::time::Duration::from_millis(1));
 
-            // Process CPU samples from rsprof-trace
-            let cpu_samples = shm.read_cpu_samples();
-            for sample in cpu_samples {
-                total_cpu_samples += 1;
+            // Process CPU samples from rsprof-trace (aggregated stats)
+            let cpu_stats = shm.read_cpu_stats();
+            for (_hash, (count, stack)) in cpu_stats {
+                total_cpu_samples += count;
                 let location = if include_internal {
-                    resolve_internal_stack(&sample.stack, &resolver)
+                    resolve_internal_stack(&stack, &resolver)
                 } else {
                     // Walk the stack to find the first user frame (skip allocator/profiler internals)
-                    find_user_frame(&sample.stack, &resolver)
+                    find_user_frame(&stack, &resolver)
                 };
                 if include_internal || !is_internal_location(&location) {
-                    storage
-                        .record_cpu_sample(sample.stack.first().copied().unwrap_or(0), &location);
+                    storage.record_cpu_sample_count(
+                        stack.first().copied().unwrap_or(0),
+                        &location,
+                        count,
+                    );
                 }
             }
 

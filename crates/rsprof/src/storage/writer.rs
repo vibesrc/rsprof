@@ -105,6 +105,13 @@ impl Storage {
         location_id
     }
 
+    /// Record CPU samples with a count (for aggregated stats from rsprof-trace)
+    pub fn record_cpu_sample_count(&mut self, _addr: u64, location: &Location, count: u64) -> i64 {
+        let location_id = self.get_location_id(location);
+        *self.pending_cpu.entry(location_id).or_insert(0) += count;
+        location_id
+    }
+
     /// Record a heap sample (aggregates by location_id)
     /// Called once per checkpoint with cumulative stats from sampler.
     /// Multiple stack keys that resolve to the same location are summed.

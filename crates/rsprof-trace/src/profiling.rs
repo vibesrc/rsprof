@@ -1,177 +1,316 @@
-//! Profiling implementation - captures CPU and heap trace events.
+//! Profiling implementation - aggregated callsite stats for CPU and heap.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Maximum stack depth to capture
 const MAX_STACK_DEPTH: usize = 64;
 
-/// Size of the ring buffer (number of events)
-const RING_BUFFER_SIZE: usize = 64 * 1024;
+/// Number of callsite stats slots
+const CALLSITE_CAPACITY: usize = 8192;
 
-/// Shared memory path for the ring buffer
+/// Number of allocation tracking slots
+const ALLOC_TABLE_CAPACITY: usize = 256 * 1024;
+
+/// Tombstone marker for deleted entries (allows continued probing)
+const TOMBSTONE: u64 = u64::MAX;
+
+/// Shared memory path
 const SHM_PATH: &[u8] = b"/rsprof-trace\0";
 
-/// Event types
-#[repr(u8)]
-#[derive(Clone, Copy)]
-pub enum EventType {
-    Alloc = 1,
-    Dealloc = 2,
-    CpuSample = 3,
-}
+/// Magic number for validation
+const MAGIC: u64 = 0x5253_5052_4F46_5333; // "RSPROFS3" (stats v3)
 
-/// A trace event recorded in the ring buffer
+/// Version number
+const VERSION: u32 = 3;
+
+/// Aggregated stats per callsite
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TraceEvent {
-    /// Event type (alloc/dealloc/cpu)
-    pub event_type: u8,
+pub struct CallsiteStats {
+    /// Callsite hash (0 = unused slot)
+    pub hash: AtomicU64,
+    /// Total allocation count
+    pub alloc_count: AtomicU64,
+    /// Total allocated bytes
+    pub alloc_bytes: AtomicU64,
+    /// Total free count
+    pub free_count: AtomicU64,
+    /// Total freed bytes
+    pub free_bytes: AtomicU64,
+    /// CPU sample count
+    pub cpu_samples: AtomicU64,
+    /// Stack depth
+    pub stack_depth: AtomicU32,
     /// Reserved for alignment
-    pub _reserved: [u8; 7],
-    /// Pointer address (for heap events) or 0 (for CPU events)
-    pub ptr: u64,
-    /// Allocation size (for heap events) or 0 (for CPU events)
-    pub size: u64,
-    /// Timestamp (nanoseconds since process start)
-    pub timestamp: u64,
-    /// Number of valid stack frames
-    pub stack_depth: u32,
-    /// Reserved
-    pub _reserved2: u32,
-    /// Stack trace (instruction pointers)
-    pub stack: [u64; MAX_STACK_DEPTH],
+    pub _reserved: u32,
+    /// Stack trace (stored once per callsite)
+    pub stack: [AtomicU64; MAX_STACK_DEPTH],
 }
 
-/// Ring buffer header stored at the start of shared memory
+/// Allocation tracking entry for dealloc attribution
 #[repr(C)]
-pub struct RingBufferHeader {
+pub struct AllocEntry {
+    /// Pointer address (0 = empty slot)
+    pub ptr: AtomicU64,
+    /// Allocation size
+    pub size: AtomicU64,
+    /// Callsite hash
+    pub callsite_hash: AtomicU64,
+}
+
+/// Shared memory header
+#[repr(C)]
+pub struct StatsHeader {
     /// Magic number for validation
     pub magic: u64,
     /// Version number
     pub version: u32,
-    /// Buffer capacity (number of events)
-    pub capacity: u32,
-    /// Write index (wraps around)
-    pub write_index: AtomicUsize,
+    /// Callsite table capacity
+    pub callsite_capacity: u32,
+    /// Alloc table capacity
+    pub alloc_table_capacity: u32,
     /// Process ID
     pub pid: u32,
-    /// Reserved
-    pub _reserved: u32,
 }
 
-const MAGIC: u64 = 0x5253_5052_4F46_5452; // "RSPROFTR" (trace)
-const VERSION: u32 = 2;
-
-/// Global state for the profiler
+/// Global state
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static IN_SIGNAL_HANDLER: AtomicBool = AtomicBool::new(false);
-static mut RING_BUFFER: *mut u8 = core::ptr::null_mut();
-static mut START_TIME: u64 = 0;
+static mut SHM_BASE: *mut u8 = core::ptr::null_mut();
 
-/// Binary code segment range (for filtering stack addresses)
-static mut CODE_START: u64 = 0;
-static mut CODE_END: u64 = 0;
+/// Get pointer to the header
+#[inline]
+fn get_header() -> *mut StatsHeader {
+    unsafe { SHM_BASE as *mut StatsHeader }
+}
 
-/// Initialize the profiler - sets up shared memory ring buffer
+/// Get pointer to callsite stats array
+#[inline]
+fn get_callsites() -> *mut CallsiteStats {
+    unsafe { SHM_BASE.add(core::mem::size_of::<StatsHeader>()) as *mut CallsiteStats }
+}
+
+/// Get pointer to alloc table array
+#[inline]
+fn get_alloc_table() -> *mut AllocEntry {
+    let callsites_size = CALLSITE_CAPACITY * core::mem::size_of::<CallsiteStats>();
+    unsafe {
+        SHM_BASE
+            .add(core::mem::size_of::<StatsHeader>())
+            .add(callsites_size) as *mut AllocEntry
+    }
+}
+
+/// Check if shared memory is initialized
+#[inline]
+fn shm_ready() -> bool {
+    unsafe { !SHM_BASE.is_null() }
+}
+
+/// Compute callsite hash from stack for heap events.
+/// Skip first 4 frames (allocator internals), hash next 8 frames.
+#[inline]
+fn stack_key_heap(stack: &[u64], depth: u32) -> u64 {
+    let mut key = 0u64;
+    let skip = 4.min(depth as usize);
+    let take = 8.min((depth as usize).saturating_sub(skip));
+
+    for i in 0..take {
+        let addr = stack[skip + i];
+        key ^= addr;
+        key = key.wrapping_mul(0x100000001b3);
+    }
+
+    // Ensure non-zero (0 means empty slot)
+    if key == 0 {
+        key = 1;
+    }
+    key
+}
+
+/// Compute callsite hash from stack for CPU samples.
+/// No skip needed - CPU stacks start with the interrupted PC.
+#[inline]
+fn stack_key_cpu(stack: &[u64], depth: u32) -> u64 {
+    let mut key = 0u64;
+    let take = 6.min(depth as usize);
+
+    for i in 0..take {
+        let addr = stack[i];
+        key ^= addr;
+        key = key.wrapping_mul(0x100000001b3);
+    }
+
+    // Ensure non-zero (0 means empty slot)
+    if key == 0 {
+        key = 1;
+    }
+    key
+}
+
+/// Find or create a callsite entry. Returns pointer to the CallsiteStats.
+#[inline]
+fn find_or_create_callsite(
+    hash: u64,
+    stack: &[u64; MAX_STACK_DEPTH],
+    depth: u32,
+) -> *mut CallsiteStats {
+    let callsites = get_callsites();
+    let mut idx = (hash as usize) % CALLSITE_CAPACITY;
+
+    for _ in 0..CALLSITE_CAPACITY {
+        let entry = unsafe { callsites.add(idx) };
+        let stored_hash = unsafe { (*entry).hash.load(Ordering::Acquire) };
+
+        if stored_hash == hash {
+            // Found existing entry
+            return entry;
+        }
+
+        if stored_hash == 0 {
+            // Empty slot - try to claim it
+            if unsafe {
+                (*entry)
+                    .hash
+                    .compare_exchange(0, hash, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            } {
+                // Successfully claimed - store the stack
+                unsafe {
+                    (*entry).stack_depth.store(depth, Ordering::Relaxed);
+                    for i in 0..(depth as usize).min(MAX_STACK_DEPTH) {
+                        (*entry).stack[i].store(stack[i], Ordering::Relaxed);
+                    }
+                }
+                return entry;
+            }
+
+            // Another thread claimed it, re-check
+            let new_hash = unsafe { (*entry).hash.load(Ordering::Acquire) };
+            if new_hash == hash {
+                return entry;
+            }
+        }
+
+        // Linear probe
+        idx = (idx + 1) % CALLSITE_CAPACITY;
+    }
+
+    // Table full - return first slot as fallback (will aggregate there)
+    callsites
+}
+
+/// Find a callsite by hash only (for dealloc attribution)
+#[inline]
+fn find_callsite(hash: u64) -> *mut CallsiteStats {
+    let callsites = get_callsites();
+    let mut idx = (hash as usize) % CALLSITE_CAPACITY;
+
+    for _ in 0..CALLSITE_CAPACITY {
+        let entry = unsafe { callsites.add(idx) };
+        let stored_hash = unsafe { (*entry).hash.load(Ordering::Acquire) };
+
+        if stored_hash == hash {
+            return entry;
+        }
+
+        if stored_hash == 0 {
+            // Not found
+            return core::ptr::null_mut();
+        }
+
+        idx = (idx + 1) % CALLSITE_CAPACITY;
+    }
+
+    core::ptr::null_mut()
+}
+
+/// Track an allocation in the alloc table
+#[inline]
+fn track_alloc(ptr: u64, size: u64, callsite_hash: u64) {
+    let alloc_table = get_alloc_table();
+    // Use pointer bits for better distribution (skip low bits which are often 0)
+    let mut idx = ((ptr >> 4) as usize) % ALLOC_TABLE_CAPACITY;
+
+    for _ in 0..1024 {
+        // Limited probing to avoid long searches
+        let entry = unsafe { alloc_table.add(idx) };
+        let stored_ptr = unsafe { (*entry).ptr.load(Ordering::Acquire) };
+
+        // Can claim empty slot (0) or tombstone (deleted)
+        if stored_ptr == 0 || stored_ptr == TOMBSTONE {
+            if unsafe {
+                (*entry)
+                    .ptr
+                    .compare_exchange(stored_ptr, ptr, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            } {
+                unsafe {
+                    (*entry).size.store(size, Ordering::Relaxed);
+                    (*entry)
+                        .callsite_hash
+                        .store(callsite_hash, Ordering::Release);
+                }
+                return;
+            }
+            // CAS failed, another thread took this slot - continue probing
+        }
+
+        idx = (idx + 1) % ALLOC_TABLE_CAPACITY;
+    }
+
+    // Table full or too much probing - drop this allocation's tracking
+}
+
+/// Untrack an allocation, returning (size, callsite_hash) if found
+#[inline]
+fn untrack_alloc(ptr: u64) -> Option<(u64, u64)> {
+    let alloc_table = get_alloc_table();
+    let mut idx = ((ptr >> 4) as usize) % ALLOC_TABLE_CAPACITY;
+
+    for _ in 0..1024 {
+        let entry = unsafe { alloc_table.add(idx) };
+        let stored_ptr = unsafe { (*entry).ptr.load(Ordering::Acquire) };
+
+        if stored_ptr == ptr {
+            let size = unsafe { (*entry).size.load(Ordering::Relaxed) };
+            let callsite_hash = unsafe { (*entry).callsite_hash.load(Ordering::Acquire) };
+            // Mark as tombstone (not 0!) to allow continued probing
+            unsafe { (*entry).ptr.store(TOMBSTONE, Ordering::Release) };
+            return Some((size, callsite_hash));
+        }
+
+        if stored_ptr == 0 {
+            // Empty slot means not found (allocation wasn't tracked or before profiling started)
+            return None;
+        }
+
+        // Tombstone - continue probing
+        idx = (idx + 1) % ALLOC_TABLE_CAPACITY;
+    }
+
+    None
+}
+
+/// Initialize the profiler - sets up shared memory
 pub fn init() {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
 
     unsafe {
-        // Get process start time for relative timestamps
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-        START_TIME = (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
-
-        // Detect binary code segment from /proc/self/maps
-        // We look for the r-xp mapping (executable) for our binary
-        let fd = libc::open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY);
-        if fd >= 0 {
-            let mut buf = [0u8; 8192];
-            let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-            libc::close(fd);
-
-            if n > 0 {
-                // Parse maps to find executable segment
-                // Format: "addr_start-addr_end perms offset dev inode pathname"
-                // We want the r-xp line (executable, not writable)
-                let mut i = 0;
-                while i < n as usize {
-                    // Find the start of the address range
-                    let mut addr_start = 0u64;
-                    let mut addr_end = 0u64;
-
-                    // Parse start address (hex until '-')
-                    while i < n as usize && buf[i] != b'-' {
-                        let c = buf[i];
-                        addr_start = addr_start * 16
-                            + match c {
-                                b'0'..=b'9' => (c - b'0') as u64,
-                                b'a'..=b'f' => (c - b'a' + 10) as u64,
-                                _ => 0,
-                            };
-                        i += 1;
-                    }
-                    if i < n as usize {
-                        i += 1;
-                    } // skip '-'
-
-                    // Parse end address (hex until ' ')
-                    while i < n as usize && buf[i] != b' ' {
-                        let c = buf[i];
-                        addr_end = addr_end * 16
-                            + match c {
-                                b'0'..=b'9' => (c - b'0') as u64,
-                                b'a'..=b'f' => (c - b'a' + 10) as u64,
-                                _ => 0,
-                            };
-                        i += 1;
-                    }
-                    if i < n as usize {
-                        i += 1;
-                    } // skip ' '
-
-                    // Check permissions - looking for "r-xp" (executable)
-                    if i + 4 <= n as usize
-                        && buf[i] == b'r'
-                        && buf[i + 2] == b'x'
-                        && buf[i + 3] == b'p'
-                    {
-                        // Found executable segment - store it
-                        if CODE_START == 0 {
-                            CODE_START = addr_start;
-                            CODE_END = addr_end;
-                        }
-                    }
-
-                    // Skip to next line
-                    while i < n as usize && buf[i] != b'\n' {
-                        i += 1;
-                    }
-                    if i < n as usize {
-                        i += 1;
-                    }
-
-                    // Only parse first few lines (our binary's mappings come first)
-                    if i > 2000 {
-                        break;
-                    }
-                }
-            }
-        }
-
         // Calculate shared memory size
-        let buffer_size = core::mem::size_of::<RingBufferHeader>()
-            + RING_BUFFER_SIZE * core::mem::size_of::<TraceEvent>();
+        let header_size = core::mem::size_of::<StatsHeader>();
+        let callsites_size = CALLSITE_CAPACITY * core::mem::size_of::<CallsiteStats>();
+        let alloc_table_size = ALLOC_TABLE_CAPACITY * core::mem::size_of::<AllocEntry>();
+        let total_size = header_size + callsites_size + alloc_table_size;
 
-        // Open/create shared memory
+        // Remove any existing shared memory to ensure fresh start
+        libc::shm_unlink(SHM_PATH.as_ptr() as *const libc::c_char);
+
+        // Create new shared memory
         let fd = libc::shm_open(
             SHM_PATH.as_ptr() as *const libc::c_char,
-            libc::O_CREAT | libc::O_RDWR,
+            libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
             0o666,
         );
         if fd < 0 {
@@ -179,8 +318,8 @@ pub fn init() {
             return;
         }
 
-        // Set size
-        if libc::ftruncate(fd, buffer_size as libc::off_t) < 0 {
+        // Set size (new file will be zero-filled)
+        if libc::ftruncate(fd, total_size as libc::off_t) < 0 {
             libc::close(fd);
             INITIALIZED.store(false, Ordering::SeqCst);
             return;
@@ -189,7 +328,7 @@ pub fn init() {
         // Map into memory
         let ptr = libc::mmap(
             core::ptr::null_mut(),
-            buffer_size,
+            total_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             fd,
@@ -202,41 +341,31 @@ pub fn init() {
             return;
         }
 
-        RING_BUFFER = ptr as *mut u8;
+        SHM_BASE = ptr as *mut u8;
+
+        // Explicitly zero the entire region to be safe
+        core::ptr::write_bytes(SHM_BASE, 0, total_size);
 
         // Initialize header
-        let header = &mut *(RING_BUFFER as *mut RingBufferHeader);
-        header.magic = MAGIC;
-        header.version = VERSION;
-        header.capacity = RING_BUFFER_SIZE as u32;
-        header.write_index = AtomicUsize::new(0);
-        header.pid = libc::getpid() as u32;
-    }
-}
+        let header = get_header();
+        (*header).magic = MAGIC;
+        (*header).version = VERSION;
+        (*header).callsite_capacity = CALLSITE_CAPACITY as u32;
+        (*header).alloc_table_capacity = ALLOC_TABLE_CAPACITY as u32;
+        (*header).pid = libc::getpid() as u32;
 
-/// Get current timestamp relative to process start
-#[inline]
-fn get_timestamp() -> u64 {
-    unsafe {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-        let now = (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
-        now.saturating_sub(START_TIME)
+        // Zero-initialize tables (mmap may already be zeroed, but be explicit)
+        // Callsites and alloc table use 0 as "empty" marker
     }
 }
 
 /// Capture stack trace using frame pointers
-#[inline]
-#[allow(dead_code)]
+#[inline(never)]
 fn capture_stack(stack: &mut [u64; MAX_STACK_DEPTH]) -> u32 {
     capture_stack_from_fp(stack, core::ptr::null())
 }
 
 /// Capture stack trace by walking frame pointers
-/// Requires binary to be built with -C force-frame-pointers=yes
 #[inline(never)]
 fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const usize) -> u32 {
     let mut depth = 0u32;
@@ -255,93 +384,23 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
             start_fp
         };
 
-        // Debug: print first few frames once
-        static DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
-        let count = DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
-        let do_debug = count == 5000;
-
-        // Print initial RBP and this function's address
-        if do_debug {
-            // Print RBP
-            let mut buf = [0u8; 32];
-            buf[0] = b'R';
-            buf[1] = b'B';
-            buf[2] = b'P';
-            buf[3] = b':';
-            let rbp_val = fp as u64;
-            for i in 0..16 {
-                let nibble = ((rbp_val >> ((15 - i) * 4)) & 0xf) as u8;
-                buf[4 + i] = if nibble < 10 {
-                    b'0' + nibble
-                } else {
-                    b'a' + nibble - 10
-                };
-            }
-            buf[20] = b'\n';
-            let _ = libc::write(2, buf.as_ptr() as _, 21);
-
-            // Print this function's address for reference
-            let fn_addr = capture_stack_from_fp as *const () as u64;
-            buf[0] = b'F';
-            buf[1] = b'N';
-            buf[2] = b'A';
-            buf[3] = b':';
-            for i in 0..16 {
-                let nibble = ((fn_addr >> ((15 - i) * 4)) & 0xf) as u8;
-                buf[4 + i] = if nibble < 10 {
-                    b'0' + nibble
-                } else {
-                    b'a' + nibble - 10
-                };
-            }
-            buf[20] = b'\n';
-            let _ = libc::write(2, buf.as_ptr() as _, 21);
-        }
-
         // Walk the stack using frame pointers
         while !fp.is_null() && depth < MAX_STACK_DEPTH as u32 {
             // Validate frame pointer alignment
             if (fp as usize) & 0x7 != 0 {
-                if do_debug {
-                    let _ = libc::write(2, b"ALIGN\n".as_ptr() as _, 6);
-                }
                 break;
             }
 
             // Bounds check
             let fp_val = fp as usize;
             if !(0x1000..=0x7fff_ffff_ffff).contains(&fp_val) {
-                if do_debug {
-                    let _ = libc::write(2, b"BOUNDS\n".as_ptr() as _, 7);
-                }
                 break;
             }
 
             // Read return address at [fp + 8]
             let ret_addr = *fp.add(1);
             if ret_addr == 0 {
-                if do_debug {
-                    let _ = libc::write(2, b"ZERO\n".as_ptr() as _, 5);
-                }
                 break;
-            }
-
-            // Debug print frame
-            if do_debug && depth < 10 {
-                let mut buf = [0u8; 32];
-                buf[0] = b'F';
-                buf[1] = b'0' + (depth as u8);
-                buf[2] = b':';
-                for i in 0..16 {
-                    let nibble = ((ret_addr >> ((15 - i) * 4)) & 0xf) as u8;
-                    buf[3 + i] = if nibble < 10 {
-                        b'0' + nibble
-                    } else {
-                        b'a' + nibble - 10
-                    };
-                }
-                buf[19] = b'\n';
-                let _ = libc::write(2, buf.as_ptr() as _, 20);
             }
 
             stack[depth as usize] = ret_addr as u64;
@@ -350,61 +409,13 @@ fn capture_stack_from_fp(stack: &mut [u64; MAX_STACK_DEPTH], start_fp: *const us
             // Move to next frame (saved RBP is at [fp])
             let next_fp = *fp as *const usize;
             if next_fp <= fp {
-                if do_debug {
-                    let _ = libc::write(2, b"BACKWARDS\n".as_ptr() as _, 10);
-                }
                 break;
             }
             fp = next_fp;
         }
-
-        if do_debug {
-            let mut buf = [0u8; 16];
-            let msg = b"DEPTH:";
-            buf[..6].copy_from_slice(msg);
-            buf[6] = b'0' + ((depth / 10) as u8);
-            buf[7] = b'0' + ((depth % 10) as u8);
-            buf[8] = b'\n';
-            let _ = libc::write(2, buf.as_ptr() as _, 9);
-        }
     }
 
     depth
-}
-
-/// Record an event to the ring buffer
-#[inline(never)]
-fn record_event_internal(event_type: EventType, ptr: u64, size: u64) {
-    record_event_with_fp(event_type, ptr, size, core::ptr::null())
-}
-
-/// Record an event with a specific starting frame pointer
-#[inline(never)]
-fn record_event_with_fp(event_type: EventType, ptr: u64, size: u64, start_fp: *const usize) {
-    unsafe {
-        if RING_BUFFER.is_null() {
-            return;
-        }
-
-        let header = &*(RING_BUFFER as *const RingBufferHeader);
-
-        // Get next write slot
-        let index = header.write_index.fetch_add(1, Ordering::Relaxed) % RING_BUFFER_SIZE;
-
-        // Calculate event location
-        let events_start = RING_BUFFER.add(core::mem::size_of::<RingBufferHeader>());
-        let event =
-            &mut *(events_start.add(index * core::mem::size_of::<TraceEvent>()) as *mut TraceEvent);
-
-        // Fill in event
-        event.event_type = event_type as u8;
-        event.ptr = ptr;
-        event.size = size;
-        event.timestamp = get_timestamp();
-
-        // Capture stack trace from specified frame pointer
-        event.stack_depth = capture_stack_from_fp(&mut event.stack, start_fp);
-    }
 }
 
 // =============================================================================
@@ -425,24 +436,53 @@ pub fn record_alloc(ptr: *mut u8, size: usize) {
         init();
     }
 
-    record_event_internal(EventType::Alloc, ptr as u64, size as u64);
+    if !shm_ready() {
+        return;
+    }
+
+    // Capture stack and compute hash
+    let mut stack = [0u64; MAX_STACK_DEPTH];
+    let depth = capture_stack(&mut stack);
+    let hash = stack_key_heap(&stack, depth);
+
+    // Find or create callsite, update stats
+    let callsite = find_or_create_callsite(hash, &stack, depth);
+    unsafe {
+        (*callsite).alloc_count.fetch_add(1, Ordering::Relaxed);
+        (*callsite)
+            .alloc_bytes
+            .fetch_add(size as u64, Ordering::Relaxed);
+    }
+
+    // Track allocation for later dealloc attribution
+    track_alloc(ptr as u64, size as u64, hash);
 }
 
 /// Record a deallocation event
 #[cfg(feature = "heap")]
 #[inline(never)]
-pub fn record_dealloc(ptr: *mut u8, size: usize) {
+pub fn record_dealloc(ptr: *mut u8, _size: usize) {
     // Don't record deallocations from within signal handler
     if IN_SIGNAL_HANDLER.load(Ordering::Relaxed) {
         return;
     }
 
-    // Ensure initialized
-    if !INITIALIZED.load(Ordering::Relaxed) {
-        init();
+    // Can't dealloc if never initialized
+    if !INITIALIZED.load(Ordering::Relaxed) || !shm_ready() {
+        return;
     }
 
-    record_event_internal(EventType::Dealloc, ptr as u64, size as u64);
+    // Look up the allocation to get size and callsite
+    if let Some((size, callsite_hash)) = untrack_alloc(ptr as u64) {
+        // Find the callsite and update free stats
+        let callsite = find_callsite(callsite_hash);
+        if !callsite.is_null() {
+            unsafe {
+                (*callsite).free_count.fetch_add(1, Ordering::Relaxed);
+                (*callsite).free_bytes.fetch_add(size, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 // Stubs when heap feature is disabled
@@ -465,15 +505,19 @@ mod cpu_profiling {
     /// Default sampling frequency in Hz
     const DEFAULT_FREQ_HZ: u32 = 99;
 
-    /// Signal handler for CPU sampling with siginfo context
-    /// This receives the ucontext which contains the interrupted thread's registers
+    /// Signal handler for CPU sampling
     extern "C" fn cpu_sample_handler(
         _sig: libc::c_int,
         _info: *mut libc::siginfo_t,
         ucontext: *mut libc::c_void,
     ) {
-        // Prevent reentrant calls and heap allocations during signal handling
+        // Prevent reentrant calls
         if IN_SIGNAL_HANDLER.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        if !shm_ready() {
+            IN_SIGNAL_HANDLER.store(false, Ordering::SeqCst);
             return;
         }
 
@@ -481,8 +525,6 @@ mod cpu_profiling {
         let (rip, start_fp) = if !ucontext.is_null() {
             unsafe {
                 let uc = ucontext as *const libc::ucontext_t;
-                // mcontext.gregs indices on x86_64 Linux:
-                // REG_RIP = 16, REG_RBP = 10
                 const REG_RIP: usize = 16;
                 const REG_RBP: usize = 10;
                 let rip = (*uc).uc_mcontext.gregs[REG_RIP] as u64;
@@ -493,87 +535,61 @@ mod cpu_profiling {
             (0, core::ptr::null())
         };
 
-        // Record CPU sample with the interrupted PC as the first frame
-        record_cpu_sample_with_context(rip, start_fp);
+        // Build stack with RIP as first frame
+        let mut stack = [0u64; MAX_STACK_DEPTH];
+        let mut depth = 0u32;
+
+        if rip != 0 {
+            stack[0] = rip;
+            depth = 1;
+        }
+
+        // Walk the rest of the stack
+        if !start_fp.is_null() {
+            let mut fp = start_fp;
+
+            while !fp.is_null() && (depth as usize) < MAX_STACK_DEPTH {
+                if (fp as usize) & 0x7 != 0 {
+                    break;
+                }
+                let fp_val = fp as usize;
+                if !(0x1000..=0x7fff_ffff_ffff).contains(&fp_val) {
+                    break;
+                }
+
+                let ret_addr = unsafe { *fp.add(1) };
+                if ret_addr == 0 {
+                    break;
+                }
+
+                stack[depth as usize] = ret_addr as u64;
+                depth += 1;
+
+                let next_fp = unsafe { *fp as *const usize };
+                if next_fp <= fp {
+                    break;
+                }
+                fp = next_fp;
+            }
+        }
+
+        // Compute callsite hash and update stats
+        let hash = stack_key_cpu(&stack, depth);
+        let callsite = find_or_create_callsite(hash, &stack, depth);
+        unsafe { (*callsite).cpu_samples.fetch_add(1, Ordering::Relaxed) };
 
         IN_SIGNAL_HANDLER.store(false, Ordering::SeqCst);
     }
 
-    /// Record a CPU sample with the interrupted PC and frame pointer
-    fn record_cpu_sample_with_context(rip: u64, start_fp: *const usize) {
-        unsafe {
-            if RING_BUFFER.is_null() {
-                return;
-            }
-
-            let header = &*(RING_BUFFER as *const RingBufferHeader);
-
-            // Get next write slot
-            let index = header.write_index.fetch_add(1, Ordering::Relaxed) % RING_BUFFER_SIZE;
-
-            // Calculate event location
-            let events_start = RING_BUFFER.add(core::mem::size_of::<RingBufferHeader>());
-            let event = &mut *(events_start.add(index * core::mem::size_of::<TraceEvent>())
-                as *mut TraceEvent);
-
-            // Fill in event
-            event.event_type = EventType::CpuSample as u8;
-            event.ptr = 0;
-            event.size = 0;
-            event.timestamp = get_timestamp();
-
-            // First frame is the interrupted PC (RIP)
-            let mut depth = 0u32;
-            if rip != 0 {
-                event.stack[0] = rip;
-                depth = 1;
-            }
-
-            // Then walk the stack from the interrupted frame pointer
-            if !start_fp.is_null() {
-                let mut fp = start_fp;
-
-                while !fp.is_null() && (depth as usize) < MAX_STACK_DEPTH {
-                    // Validate frame pointer
-                    if (fp as usize) & 0x7 != 0 {
-                        break;
-                    }
-                    let fp_val = fp as usize;
-                    if !(0x1000..=0x7fff_ffff_ffff).contains(&fp_val) {
-                        break;
-                    }
-
-                    // Read return address (at fp + 8)
-                    let ret_addr = *fp.add(1);
-                    if ret_addr == 0 {
-                        break;
-                    }
-
-                    event.stack[depth as usize] = ret_addr as u64;
-                    depth += 1;
-
-                    // Get next frame pointer
-                    let next_fp = *fp as *const usize;
-                    if next_fp <= fp {
-                        break;
-                    }
-                    fp = next_fp;
-                }
-            }
-
-            event.stack_depth = depth;
-        }
-    }
-
     /// Start CPU profiling with timer-based sampling
     pub fn start_cpu_profiling(freq_hz: u32) {
-        // Ensure ring buffer is initialized
+        // Ensure initialized
         if !INITIALIZED.load(Ordering::Relaxed) {
             init();
         }
 
         unsafe {
-            // Set up signal handler for SIGPROF with SA_SIGINFO to get ucontext
+            // Set up signal handler for SIGPROF with SA_SIGINFO
             let mut sa: libc::sigaction = core::mem::zeroed();
             sa.sa_sigaction = cpu_sample_handler as *const () as usize;
             sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;

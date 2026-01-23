@@ -924,13 +924,17 @@ fn simplify_path(path: &str) -> String {
 fn format_function(func: &str) -> String {
     let mut result = func.to_string();
 
-    // Remove hash suffix
+    // Remove hash suffix FIRST (before shortening)
     if let Some(idx) = result.rfind("::h") {
         let suffix = &result[idx + 3..];
         if suffix.len() == 16 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
             result = result[..idx].to_string();
         }
     }
+
+    // Now shorten to function name or Type::method
+    let shortened = crate::symbols::shorten_function_name(&result);
+    result = shortened.to_string();
 
     // Simplify trait impls: <Type as Trait>::method -> Type::method
     if result.starts_with('<')

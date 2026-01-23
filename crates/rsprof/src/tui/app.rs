@@ -132,6 +132,8 @@ const SKIP_FUNCTION_PATTERNS: &[&str] = &[
     "::{{closure}}", // closures attributed to parent
 ];
 
+const SPARKLINE_WIDTH: u64 = 12;
+
 /// Check if a file path looks like internal/library code
 fn is_internal_file(file: &str) -> bool {
     file.is_empty()
@@ -492,7 +494,9 @@ pub struct App {
     live_cpu_totals: HashMap<i64, u64>,
     live_cpu_instant: HashMap<i64, u64>,
     location_info: HashMap<i64, LocationInfo>,
+    cpu_last_seen: HashMap<i64, u64>,
     heap_live_entries: HashMap<i64, HeapEntry>,
+    heap_last_seen: HashMap<i64, u64>,
     chart_checkpoint_seq: u64,
     cached_entries: Vec<CpuEntry>,
     cached_heap_entries: Vec<HeapEntry>,
@@ -558,7 +562,9 @@ impl App {
             live_cpu_totals: HashMap::new(),
             live_cpu_instant: HashMap::new(),
             location_info: HashMap::new(),
+            cpu_last_seen: HashMap::new(),
             heap_live_entries: HashMap::new(),
+            heap_last_seen: HashMap::new(),
             chart_checkpoint_seq: 0,
             cached_entries: Vec::new(),
             cached_heap_entries: Vec::new(),
@@ -643,7 +649,9 @@ impl App {
             live_cpu_totals: HashMap::new(),
             live_cpu_instant: HashMap::new(),
             location_info: HashMap::new(),
+            cpu_last_seen: HashMap::new(),
             heap_live_entries: HashMap::new(),
+            heap_last_seen: HashMap::new(),
             chart_checkpoint_seq: 0,
             cached_entries: entries,
             cached_heap_entries: heap_entries,
@@ -793,26 +801,27 @@ impl App {
                     {
                         let _events = shm.poll_events(std::time::Duration::from_millis(1));
 
-                        // Process CPU samples from rsprof-trace
-                        let cpu_samples = shm.read_cpu_samples();
+                        // Process CPU samples from rsprof-trace (aggregated stats)
+                        let cpu_stats = shm.read_cpu_stats();
                         let live_cpu_totals = &mut self.live_cpu_totals;
                         let live_cpu_instant = &mut self.live_cpu_instant;
                         let location_info = &mut self.location_info;
-                        for sample in cpu_samples {
-                            self.total_samples += 1;
+                        for (_hash, (count, stack)) in cpu_stats {
+                            self.total_samples += count;
                             let location = if self.include_internal {
-                                resolve_internal_stack(&sample.stack, resolver)
+                                resolve_internal_stack(&stack, resolver)
                             } else {
                                 // Walk the stack to find the first user frame (skip allocator/profiler internals)
-                                find_user_frame(&sample.stack, resolver)
+                                find_user_frame(&stack, resolver)
                             };
                             if self.include_internal || !is_internal_location(&location) {
-                                let location_id = storage.record_cpu_sample(
-                                    sample.stack.first().copied().unwrap_or(0),
+                                let location_id = storage.record_cpu_sample_count(
+                                    stack.first().copied().unwrap_or(0),
                                     &location,
+                                    count,
                                 );
-                                *live_cpu_totals.entry(location_id).or_insert(0) += 1;
-                                *live_cpu_instant.entry(location_id).or_insert(0) += 1;
+                                *live_cpu_totals.entry(location_id).or_insert(0) += count;
+                                *live_cpu_instant.entry(location_id).or_insert(0) += count;
                                 location_info
                                     .entry(location_id)
                                     .or_insert_with(|| LocationInfo {
@@ -1441,6 +1450,9 @@ impl App {
                 });
         }
 
+        // Drop stale CPU entries once they fall off the sparkline window.
+        self.prune_cpu_entries();
+
         // Update heap sparklines
         let heap_current: HashMap<i64, i64> = self
             .cached_heap_entries
@@ -1468,6 +1480,9 @@ impl App {
                     sparkline
                 });
         }
+
+        // Drop stale heap entries once they fall off the sparkline window.
+        self.prune_heap_entries();
 
         // New heap data arrived; force chart cache refresh for live updates.
         self.heap_chart_cache.location_id = None;
@@ -1517,6 +1532,10 @@ impl App {
                 .then(a.location_id.cmp(&b.location_id))
         });
         self.cached_entries = entries;
+        for entry in &self.cached_entries {
+            self.cpu_last_seen
+                .insert(entry.location_id, self.chart_checkpoint_seq);
+        }
         self.live_cpu_instant.clear();
 
         self.sort_cpu_entries();
@@ -1525,6 +1544,44 @@ impl App {
     fn update_heap_entries(&mut self, entries: Vec<HeapEntry>) {
         self.cached_heap_entries = entries;
         self.sort_heap_entries();
+        for entry in &self.cached_heap_entries {
+            self.heap_last_seen
+                .insert(entry.location_id, self.chart_checkpoint_seq);
+        }
+    }
+
+    fn prune_cpu_entries(&mut self) {
+        let cutoff = self.chart_checkpoint_seq.saturating_sub(SPARKLINE_WIDTH);
+        self.cached_entries.retain(|entry| {
+            self.cpu_last_seen
+                .get(&entry.location_id)
+                .copied()
+                .unwrap_or(0)
+                > cutoff
+        });
+        let keep: std::collections::HashSet<i64> =
+            self.cached_entries.iter().map(|e| e.location_id).collect();
+        self.live_cpu_totals.retain(|id, _| keep.contains(id));
+        self.location_info.retain(|id, _| keep.contains(id));
+        self.cpu_last_seen.retain(|id, _| keep.contains(id));
+    }
+
+    fn prune_heap_entries(&mut self) {
+        let cutoff = self.chart_checkpoint_seq.saturating_sub(SPARKLINE_WIDTH);
+        self.cached_heap_entries.retain(|entry| {
+            self.heap_last_seen
+                .get(&entry.location_id)
+                .copied()
+                .unwrap_or(0)
+                > cutoff
+        });
+        let keep: std::collections::HashSet<i64> = self
+            .cached_heap_entries
+            .iter()
+            .map(|e| e.location_id)
+            .collect();
+        self.heap_live_entries.retain(|id, _| keep.contains(id));
+        self.heap_last_seen.retain(|id, _| keep.contains(id));
     }
 
     fn sort_all_entries(&mut self) {

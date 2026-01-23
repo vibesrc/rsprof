@@ -2,8 +2,10 @@
 
 use crate::analytics::AnalyticsEngine;
 use crate::audit::AuditLog;
+use crate::buffer_pool::{BufferPool, DepthPool, SawtoothPool, SineWavePool, SquarePool};
 use crate::cache::DataCache;
 use crate::checkout::CheckoutEngine;
+use crate::cpu_patterns::{DepthCpuLoad, SawtoothCpuLoad, SineCpuLoad, SquareCpuLoad, StepCpuLoad};
 use crate::model::{Request, Response, Route, Stats};
 use crate::search::SearchEngine;
 use crate::utils;
@@ -18,6 +20,18 @@ pub struct Application {
     checkout: CheckoutEngine,
     analytics: AnalyticsEngine,
     audit: AuditLog,
+    // Memory patterns
+    buffer_pool: BufferPool,
+    sine_pool: SineWavePool,
+    sawtooth_pool: SawtoothPool,
+    square_pool: SquarePool,
+    depth_pool: DepthPool,
+    // CPU patterns
+    sine_cpu: SineCpuLoad,
+    step_cpu: StepCpuLoad,
+    sawtooth_cpu: SawtoothCpuLoad,
+    square_cpu: SquareCpuLoad,
+    depth_cpu: DepthCpuLoad,
 }
 
 impl Application {
@@ -36,6 +50,18 @@ impl Application {
             checkout: CheckoutEngine::new(),
             analytics: AnalyticsEngine::new(),
             audit: AuditLog::new(),
+            // Memory patterns
+            buffer_pool: BufferPool::new(),
+            sine_pool: SineWavePool::new(),
+            sawtooth_pool: SawtoothPool::new(),
+            square_pool: SquarePool::new(),
+            depth_pool: DepthPool::new(),
+            // CPU patterns
+            sine_cpu: SineCpuLoad::new(),
+            step_cpu: StepCpuLoad::new(),
+            sawtooth_cpu: SawtoothCpuLoad::new(),
+            square_cpu: SquareCpuLoad::new(),
+            depth_cpu: DepthCpuLoad::new(),
         }
     }
 
@@ -51,6 +77,20 @@ impl Application {
     pub fn tick(&mut self) {
         self.tick += 1;
         self.stats.requests += 1;
+
+        // Memory patterns
+        self.buffer_pool.tick(); // Periodic flush: 10MB every 5s, flush at 100MB
+        self.sine_pool.tick(); // Sine wave: 0→50MB→0 over 10s
+        self.sawtooth_pool.tick(); // Sawtooth: ramp 0→40MB over 8s, drop
+        self.square_pool.tick(); // Square: alternates 5MB/35MB every 3s
+        self.depth_pool.tick(); // Varying depths: cycles through 4 depths over 12s
+
+        // CPU patterns
+        self.sine_cpu.tick(); // Sine wave CPU load over 10s
+        self.step_cpu.tick(); // Step between low/high every 5s
+        self.sawtooth_cpu.tick(); // Sawtooth: ramps up over 6s
+        self.square_cpu.tick(); // Square: alternates low/high every 2s
+        self.depth_cpu.tick(); // Varying depths: cycles through 4 depths over 8s
 
         let request = self.generate_request();
         let headers = utils::parse_headers(&request.payload);

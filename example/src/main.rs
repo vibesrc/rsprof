@@ -7,8 +7,10 @@
 mod analytics;
 mod app;
 mod audit;
+mod buffer_pool;
 mod cache;
 mod checkout;
+mod cpu_patterns;
 mod model;
 mod search;
 mod utils;

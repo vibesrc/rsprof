@@ -36,11 +36,11 @@ crossterm = "0.28"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 humantime = "2"
 comfy-table = "7"
-rsprof-trace = { path = "../rsprof-trace", optional = true, features = ["profiling"] }
+rsprof-trace = { version = "0.1.5", path = "../rsprof-trace", optional = true, features = ["profiling"] }
 
 [features]
 default = []
 self-profile = ["rsprof-trace"]
 
 [dev-dependencies]
-rsprof-trace = { path = "../rsprof-trace", features = ["profiling"] }
+rsprof-trace = { version = "0.1.5", path = "../rsprof-trace", features = ["profiling"] }
